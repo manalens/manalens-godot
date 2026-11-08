@@ -1,0 +1,15 @@
+; Headless test project for the Untitled Analytics Godot SDK.
+; Run: godot --headless --path sdks/godot/test_project -- --endpoint=http://127.0.0.1:3291 --write-key=ua_...
+; addons/untitled_analytics is a symlink to ../../addons/untitled_analytics.
+
+config_version=5
+
+[application]
+
+config/name="Untitled Analytics SDK Test"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.7")
+
+[autoload]
+
+UntitledAnalytics="*res://addons/untitled_analytics/untitled_analytics.gd"
