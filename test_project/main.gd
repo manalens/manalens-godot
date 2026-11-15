@@ -1,7 +1,9 @@
 extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
-##   --write-key=KEY      a project publishable key (required)
+##   --publishable-key=KEY  a project publishable key (required; --write-key=KEY,
+##                          the old name, passes the key as the deprecated
+##                          write_key option)
 ##   --mode=MODE          offline (default), consent, recovery, errors or link
 ##   --run-id=ID          tag for the events (default: random)
 ##
@@ -29,8 +31,8 @@ func _ready() -> void:
 	for arg in OS.get_cmdline_user_args():
 		var parts := String(arg).trim_prefix("--").split("=", true, 1)
 		_args[parts[0]] = parts[1] if parts.size() > 1 else "true"
-	if not _args.has("endpoint") or not _args.has("write-key"):
-		_finish({"error": "pass -- --endpoint=URL --write-key=KEY"})
+	if not _args.has("endpoint") or not (_args.has("publishable-key") or _args.has("write-key")):
+		_finish({"error": "pass -- --endpoint=URL --publishable-key=KEY"})
 		return
 	var run_id := String(_args.get("run-id", str(randi())))
 	var mode := String(_args.get("mode", "offline"))
@@ -46,12 +48,18 @@ func _ready() -> void:
 
 
 func _options(endpoint: String, consent_required := false) -> Dictionary:
-	return {
-		"write_key": _args["write-key"], "endpoint": endpoint,
+	var options := {
+		"endpoint": endpoint,
 		"app_version": "0.1.0-test", "build": "godot-test", "storefront": "itch",
 		"consent_required": consent_required, "flush_interval_s": 1.0,
 		"quit_timeout_s": 5.0, "debug": _args.has("debug"),
 	}
+	# --write-key exercises the deprecated write_key option.
+	if _args.has("publishable-key"):
+		options["publishable_key"] = _args["publishable-key"]
+	else:
+		options["write_key"] = _args["write-key"]
+	return options
 
 
 func _offline(run_id: String, result: Dictionary) -> void:

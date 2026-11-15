@@ -6,7 +6,7 @@ extends Node
 ## place of `context.page`.
 ##
 ##   UntitledAnalytics.init({
-##       "write_key": "ua_pk_...",  # the publishable key
+##       "publishable_key": "ua_pk_...",
 ##       "endpoint": "https://collector.example.com",
 ##       "app_version": "1.4.0", "build": "571", "storefront": "steam",
 ##   })
@@ -49,7 +49,9 @@ const MAX_STRING := 1024
 const HANDOFF_PARAM := "ua_hid"
 
 var _options := {
-	"write_key": "",
+	## The project publishable key (`ua_pk_...`). `write_key` is its old name
+	## and still works (deprecated).
+	"publishable_key": "",
 	"endpoint": "",
 	"app_version": "",
 	"build": "",
@@ -72,6 +74,7 @@ var _options := {
 	"debug": false,
 }
 var _initialized := false
+var _warned_write_key := false
 var _identity_active := false
 var _cfg := ConfigFile.new()
 var _queue: Array = []  # [{ "at": unix seconds, "event": envelope }]
@@ -104,27 +107,40 @@ var _quoted_re := RegEx.create_from_string("\"[^\"]*\"|'[^']*'")
 
 # Public API ------------------------------------------------------------------
 
-## Start the SDK. Keys: write_key, endpoint (required); app_version, build,
+## Start the SDK. Keys: publishable_key, endpoint (required); app_version, build,
 ## storefront, consent_required, flush_interval_s, flush_at, max_queue,
 ## handle_quit, quit_timeout_s, capture_engine_errors, capture_warnings,
-## max_auto_errors_per_session, debug.
+## max_auto_errors_per_session, debug. `write_key` is the old name of
+## `publishable_key` and still works (deprecated, with one warning).
 func init(options: Dictionary) -> void:
 	if _initialized:
 		push_warning("UntitledAnalytics: init() was already called")
 		return
 	for key in options:
+		if key == "write_key":
+			continue
 		if _options.has(key):
 			_options[key] = options[key]
 		else:
 			push_warning("UntitledAnalytics: unknown option %s" % key)
-	if String(_options.write_key) == "" or String(_options.endpoint) == "":
-		push_error("UntitledAnalytics: write_key and endpoint are required")
+	if options.has("write_key"):
+		if not _warned_write_key:
+			_warned_write_key = true
+			push_warning("UntitledAnalytics: the write_key option is deprecated; use publishable_key")
+		var legacy := String(options["write_key"])
+		var current := String(_options.publishable_key)
+		if current != "" and legacy != "" and current != legacy:
+			push_error("UntitledAnalytics: give one key: publishable_key (write_key is its old name). The two values differ")
+			return
+		if current == "":
+			_options.publishable_key = legacy
+	if String(_options.publishable_key) == "" or String(_options.endpoint) == "":
+		push_error("UntitledAnalytics: publishable_key and endpoint are required")
 		return
-	# write_key takes the publishable key. A secret key (ua_sk_) or an API key
-	# (ua_api_, ua_mcp_) must never ship in a game build.
-	var key := String(_options.write_key)
+	# A secret key (ua_sk_) or an API key (ua_api_, ua_mcp_) must never ship in a game build.
+	var key := String(_options.publishable_key)
 	if key.begins_with("ua_sk_") or key.begins_with("ua_api_") or key.begins_with("ua_mcp_"):
-		push_error("UntitledAnalytics: write_key must be the publishable key (ua_pk_...). Never put a secret key or an API key in a game build")
+		push_error("UntitledAnalytics: publishable_key must be the publishable key (ua_pk_...). Never put a secret key or an API key in a game build")
 		return
 	_options.flush_at = clampi(int(_options.flush_at), 1, 50)
 	_options.max_queue = maxi(int(_options.max_queue), int(_options.flush_at))
@@ -260,7 +276,7 @@ func flush() -> void:
 		batch.append(entry.event)
 		_in_flight.append(entry.event.message_id)
 	var url := String(_options.endpoint).trim_suffix("/") + "/v0/events"
-	var headers := PackedStringArray(["Content-Type: application/json", "x-write-key: %s" % _options.write_key])
+	var headers := PackedStringArray(["Content-Type: application/json", "x-publishable-key: %s" % _options.publishable_key])
 	_sending = true
 	var error := _http.request(url, headers, HTTPClient.METHOD_POST, JSON.stringify({"events": batch}))
 	if error != OK:

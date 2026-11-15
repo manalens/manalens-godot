@@ -2,7 +2,7 @@
 
 Game analytics for Godot 4 in plain GDScript (no native code). It works on every export target that has `HTTPRequest`: Windows, macOS, Linux, Android, iOS and Web.
 
-It sends events to the Untitled Analytics collector (`POST /v0/events`) with your project's **Publishable key** (the `write_key` option). The Publishable key is safe to ship in a game build. Never put a Secret key or an API key in a build. Events go in the same envelope as the web SDK, with `context.app` in place of `context.page`. See the docs page `docs/sdks/godot.mdx` and `docs/sdks/app-events.mdx` in the Untitled Analytics repository.
+It sends events to the Untitled Analytics collector (`POST /v0/events`) with your project's **Publishable key** (the `publishable_key` option, sent in the `x-publishable-key` header). The Publishable key is safe to ship in a game build. Never put a Secret key or an API key in a build. Events go in the same envelope as the web SDK, with `context.app` in place of `context.page`. See the docs page `docs/sdks/godot.mdx` and `docs/sdks/app-events.mdx` in the Untitled Analytics repository.
 
 ## Install
 
@@ -14,7 +14,7 @@ It sends events to the Untitled Analytics collector (`POST /v0/events`) with you
 ```gdscript
 func _ready() -> void:
     UntitledAnalytics.init({
-        "write_key": "YOUR_PUBLISHABLE_KEY",
+        "publishable_key": "YOUR_PUBLISHABLE_KEY",
         "endpoint": "https://your-collector.example.com",
         "app_version": "1.4.0",
         "build": "571",
@@ -41,7 +41,7 @@ func _on_signed_in(player_id: String) -> void:
 | `flush()` | Sends queued events now. |
 | `await shutdown()` | Sends `session_end` and flushes, for at most `quit_timeout_s`. |
 
-Options: `write_key` and `endpoint` (required), `app_version`, `build`, `storefront`, `consent_required` (false), `flush_interval_s` (10), `flush_at` (20, also the batch size), `max_queue` (1000), `handle_quit` (true), `quit_timeout_s` (2), `capture_engine_errors` (true, Godot 4.5+), `capture_warnings` (false), `max_auto_errors_per_session` (50), `debug` (false).
+Options: `publishable_key` and `endpoint` (required; `write_key` is the old name of `publishable_key` and still works, with a deprecation warning), `app_version`, `build`, `storefront`, `consent_required` (false), `flush_interval_s` (10), `flush_at` (20, also the batch size), `max_queue` (1000), `handle_quit` (true), `quit_timeout_s` (2), `capture_engine_errors` (true, Godot 4.5+), `capture_warnings` (false), `max_auto_errors_per_session` (50), `debug` (false).
 
 ## How it works
 
