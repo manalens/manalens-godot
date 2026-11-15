@@ -45,6 +45,8 @@ const AUTO_ERRORS_PER_FRAME := 5
 const BREADCRUMBS := 20
 ## The collector keeps string properties up to 1024 characters.
 const MAX_STRING := 1024
+## Identity handoff (P-2523): the URL parameter that the web SDK reads.
+const HANDOFF_PARAM := "ua_hid"
 
 var _options := {
 	"write_key": "",
@@ -295,6 +297,29 @@ func set_endpoint(endpoint: String) -> void:
 
 func get_anonymous_id() -> String:
 	return _anonymous_id
+
+
+## Add this install's handoff parameter to a website URL before the game opens
+## it, so the website joins the browser to this player without identify():
+##
+##   OS.shell_open(UntitledAnalytics.link_url("https://example.com/wiki"))
+##
+## The parameter is `ua_hid=<anonymous ID>.<unix seconds>`. The website's
+## Untitled Analytics SDK removes it from the address bar, and the collector
+## accepts it for 10 minutes. Before consent (or before init) the URL is
+## returned unchanged.
+func link_url(url: String) -> String:
+	if not _identity_active or _anonymous_id == "":
+		return url
+	var fragment := ""
+	var hash_at := url.find("#")
+	if hash_at >= 0:
+		fragment = url.substr(hash_at)
+		url = url.substr(0, hash_at)
+	var separator := "&" if url.contains("?") else "?"
+	if url.ends_with("?") or url.ends_with("&"):
+		separator = ""
+	return "%s%s%s=%s.%d%s" % [url, separator, HANDOFF_PARAM, _anonymous_id, int(Time.get_unix_time_from_system()), fragment]
 
 
 func get_session_id() -> String:

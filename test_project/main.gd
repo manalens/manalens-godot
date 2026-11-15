@@ -2,7 +2,7 @@ extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
 ##   --write-key=KEY      a project publishable key (required)
-##   --mode=MODE          offline (default), consent, recovery or errors
+##   --mode=MODE          offline (default), consent, recovery, errors or link
 ##   --run-id=ID          tag for the events (default: random)
 ##
 ## offline:  fresh state; queue events against a dead endpoint, check they are
@@ -14,6 +14,9 @@ extends Node
 ##           app_unclean_exit.
 ## errors:   fresh state; track_error, before_send, the dedupe limit and an
 ##           engine error from push_error (Godot 4.5+ logger).
+##
+## link:     link_url() before and after consent (handoff parameter, query and
+##           fragment kept); needs no network.
 ##
 ## Prints one line `UA_RESULT {json}` and exits 0 on success, 1 on failure.
 
@@ -37,6 +40,7 @@ func _ready() -> void:
 		"consent": await _consent(run_id, result)
 		"recovery": await _recovery(run_id, result)
 		"errors": await _errors(run_id, result)
+		"link": await _link(run_id, result)
 		_: _failures.append("unknown mode %s" % mode)
 	_finish(result)
 
@@ -95,6 +99,30 @@ func _consent(run_id: String, result: Dictionary) -> void:
 	await sdk.shutdown()
 	_check(sdk.get_queue_size() == 0, "events left after shutdown")
 	result["anonymous_id"] = sdk.get_anonymous_id()
+
+
+func _link(_run_id: String, result: Dictionary) -> void:
+	_fresh()
+	var sdk = UntitledAnalytics
+	sdk.init(_options(OFFLINE_ENDPOINT, true))
+	var url := "https://example.com/wiki"
+	_check(sdk.link_url(url) == url, "link_url added an ID before consent")
+	sdk.set_consent(true)
+	var id: String = sdk.get_anonymous_id()
+	var before := int(Time.get_unix_time_from_system())
+	var plain: String = sdk.link_url(url)
+	var query: String = sdk.link_url("https://example.com/wiki?page=2#boss")
+	var after := int(Time.get_unix_time_from_system())
+	result["plain"] = plain
+	result["query"] = query
+	var prefix := url + "?ua_hid=" + id + "."
+	_check(plain.begins_with(prefix), "plain link: %s" % plain)
+	var at := int(plain.trim_prefix(prefix))
+	_check(at >= before and at <= after, "handoff time %d is not now" % at)
+	_check(query.begins_with("https://example.com/wiki?page=2&ua_hid=" + id + ".") and query.ends_with("#boss"), "query link: %s" % query)
+	sdk.reset()
+	_check(not sdk.link_url(url).contains(id), "link_url kept the old ID after reset()")
+	await sdk.shutdown()
 
 
 func _recovery(run_id: String, result: Dictionary) -> void:
