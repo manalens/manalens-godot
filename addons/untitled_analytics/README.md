@@ -35,10 +35,12 @@ func _on_signed_in(player_id: String) -> void:
 | `identify(user_id, traits)` | Attaches a player ID (kept on disk) and traits. |
 | `reset()` | Ends the session, forgets the player ID, makes a new anonymous ID and starts a new session. |
 | `set_consent(granted)` | Consent mode. `true` starts tracking; `false` deletes the ID, the session and the queue. |
+| `track_error(message, options)` | Sends an `error` event. Options: `severity`, `error_type`, `handled`, `stack`, `file`, `line`, `function`, `fingerprint`, `properties`. |
+| `set_before_send(callable)` | Changes each error's properties before it is queued; return null to drop the error. |
 | `flush()` | Sends queued events now. |
 | `await shutdown()` | Sends `session_end` and flushes, for at most `quit_timeout_s`. |
 
-Options: `write_key` and `endpoint` (required), `app_version`, `build`, `storefront`, `consent_required` (false), `flush_interval_s` (10), `flush_at` (20, also the batch size), `max_queue` (1000), `handle_quit` (true), `quit_timeout_s` (2), `debug` (false).
+Options: `write_key` and `endpoint` (required), `app_version`, `build`, `storefront`, `consent_required` (false), `flush_interval_s` (10), `flush_at` (20, also the batch size), `max_queue` (1000), `handle_quit` (true), `quit_timeout_s` (2), `capture_engine_errors` (true, Godot 4.5+), `capture_warnings` (false), `max_auto_errors_per_session` (50), `debug` (false).
 
 ## How it works
 
@@ -48,6 +50,8 @@ Options: `write_key` and `endpoint` (required), `app_version`, `build`, `storefr
 - **Retry:** a network error or a 5xx, 408 or 429 response keeps the batch and waits about 2, 4, 8 ... seconds with jitter (at most 5 minutes). Other 4xx responses drop the batch, because a retry fails again.
 - **Quit:** with `handle_quit` (default), the SDK handles the window close request: it sends `session_end`, flushes for at most `quit_timeout_s`, then quits. If your game handles the close request itself (for example with a confirmation dialog), set `handle_quit` to false and call `await UntitledAnalytics.shutdown()` before `get_tree().quit()`.
 - **Consent:** with `consent_required: true`, no event is recorded and no ID is written until `set_consent(true)`. The choice is saved, so it applies on the next launch too. `identify()` before consent is sent after consent.
+- **Errors:** on Godot 4.5+, `error_logger.gd` (an `OS.add_logger()` logger) collects engine and script errors under a Mutex, and the SDK sends them on the main thread. Limits: the same fingerprint once a second, 20 errors in 10 seconds, 5 engine errors in one frame and 50 in one session. Dropped errors are counted in `session_end` (`errors_dropped`).
+- **Crashes:** when the last run did not exit normally while the game had focus, the next launch sends `app_unclean_exit` in the old session, with `previous_session_id`, `previous_build` and `previous_app_version`.
 - **Context:** `context.app.platform` comes from `OS.get_name()`, `engine` is `godot`, and `app_version`, `build` and `storefront` come from `init()`.
 
 ## Web export

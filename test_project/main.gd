@@ -2,7 +2,7 @@ extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
 ##   --write-key=KEY      a project write key (required)
-##   --mode=MODE          offline (default), consent or recovery
+##   --mode=MODE          offline (default), consent, recovery or errors
 ##   --run-id=ID          tag for the events (default: random)
 ##
 ## offline:  fresh state; queue events against a dead endpoint, check they are
@@ -10,7 +10,10 @@ extends Node
 ## consent:  fresh state with consent_required; events before consent are not
 ##           queued and no ID is stored; then set_consent(true).
 ## recovery: keeps the ID; plants a session that was left open 2 hours ago (a
-##           crash) and checks that init ends it with session_end.
+##           crash) and checks that init ends it with session_end and sends
+##           app_unclean_exit.
+## errors:   fresh state; track_error, before_send, the dedupe limit and an
+##           engine error from push_error (Godot 4.5+ logger).
 ##
 ## Prints one line `UA_RESULT {json}` and exits 0 on success, 1 on failure.
 
@@ -33,6 +36,7 @@ func _ready() -> void:
 		"offline": await _offline(run_id, result)
 		"consent": await _consent(run_id, result)
 		"recovery": await _recovery(run_id, result)
+		"errors": await _errors(run_id, result)
 		_: _failures.append("unknown mode %s" % mode)
 	_finish(result)
 
@@ -110,6 +114,38 @@ func _recovery(run_id: String, result: Dictionary) -> void:
 	_check(sdk.get_queue_size() == 0, "events left after shutdown")
 	result["planted_session"] = planted
 	result["anonymous_id"] = sdk.get_anonymous_id()
+
+
+func _errors(run_id: String, result: Dictionary) -> void:
+	_fresh()
+	var sdk = UntitledAnalytics
+	sdk.init(_options(String(_args["endpoint"])))
+	sdk.set_before_send(func(props: Dictionary):
+		if String(props.message).contains("secret"):
+			return null
+		props["run_id"] = run_id
+		return props)
+	sdk.track("level_start", {"level": 3, "run_id": run_id})
+	sdk.track_error("Save failed for slot 3", {"error_type": "SaveFailed", "severity": "critical", "handled": false, "properties": {"level": 3}})
+	# Same type, numbers differ: same fingerprint within 1 s, so dropped.
+	sdk.track_error("Save failed for slot 4", {"error_type": "SaveFailed"})
+	sdk.track_error("secret token abc")  # before_send drops it
+	var queued_manual: int = sdk.get_queue_size()
+	_engine_error()
+	_engine_error()  # same place: dropped by the dedupe
+	await get_tree().process_frame
+	await get_tree().process_frame
+	result["engine_capture"] = sdk._error_logger != null
+	result["queued_after_engine"] = sdk.get_queue_size() - queued_manual
+	_check(sdk._error_logger != null, "no engine logger on Godot %s" % Engine.get_version_info().string)
+	_check(result.queued_after_engine == 1, "expected 1 engine error, got %d" % result.queued_after_engine)
+	await sdk.shutdown()
+	_check(sdk.get_queue_size() == 0, "events left after shutdown")
+	result["anonymous_id"] = sdk.get_anonymous_id()
+
+
+func _engine_error() -> void:
+	push_error("Engine boom in wave 7")
 
 
 func _fresh() -> void:

@@ -17,6 +17,11 @@ extends Node
 ## `session_start` and `session_end` are automatic. Events are batched, kept in
 ## an offline file queue (`user://untitled_analytics_queue.json`, at most 1000
 ## events and 7 days), and retried with backoff.
+##
+## Errors: `track_error()` sends an `error` event. On Godot 4.5+ the SDK also
+## sends engine and script errors (`capture_engine_errors`). When the last run
+## ended without a normal exit (a crash or a killed process), the next launch
+## sends `app_unclean_exit` in that old session.
 
 signal flushed(sent: int, ok: bool)
 
@@ -29,6 +34,17 @@ const SESSION_TIMEOUT_S := 30.0 * 60.0
 const MAX_EVENT_AGE_S := 7.0 * 24.0 * 3600.0 - 3600.0
 const MAX_BACKOFF_S := 300.0
 const STOREFRONTS := ["steam", "itch", "epic", "gog", "app_store", "play", "other"]
+const SEVERITIES := ["debug", "info", "warning", "error", "critical"]
+const ERROR_LOGGER_PATH := "res://addons/untitled_analytics/error_logger.gd"
+## Error limits (as Sentry Godot): the same fingerprint at most once a second,
+## at most 20 errors in 10 seconds, at most 5 automatic errors in one frame.
+const ERROR_DEDUPE_MS := 1000
+const ERROR_WINDOW_MS := 10000
+const ERROR_WINDOW_MAX := 20
+const AUTO_ERRORS_PER_FRAME := 5
+const BREADCRUMBS := 20
+## The collector keeps string properties up to 1024 characters.
+const MAX_STRING := 1024
 
 var _options := {
 	"write_key": "",
@@ -45,6 +61,12 @@ var _options := {
 	## true: the SDK delays the window close to send session_end and flush.
 	"handle_quit": true,
 	"quit_timeout_s": 2.0,
+	## Godot 4.5+: send engine and script errors as `error` events.
+	"capture_engine_errors": true,
+	## Also send engine warnings (off: they are often noisy).
+	"capture_warnings": false,
+	## Automatic errors in one session; track_error() calls do not count.
+	"max_auto_errors_per_session": 50,
 	"debug": false,
 }
 var _initialized := false
@@ -67,13 +89,23 @@ var _http: HTTPRequest
 var _timer: Timer
 var _label_re := RegEx.create_from_string("^[A-Za-z0-9._+\\- ]+$")
 var _closing := false
+var _before_send := Callable()
+var _breadcrumbs: Array = []  # the last event names, oldest first
+var _error_seen := {}  # fingerprint -> ticks (ms) of the last send
+var _error_times: Array = []  # ticks (ms) of the errors sent in the last 10 s
+var _auto_errors := 0  # automatic errors sent in this session
+var _errors_dropped := 0  # errors the limits dropped in this session
+var _error_logger = null  # error_logger.gd instance (Godot 4.5+)
+var _number_re := RegEx.create_from_string("0x[0-9A-Fa-f]+|\\d+")
+var _quoted_re := RegEx.create_from_string("\"[^\"]*\"|'[^']*'")
 
 
 # Public API ------------------------------------------------------------------
 
 ## Start the SDK. Keys: write_key, endpoint (required); app_version, build,
 ## storefront, consent_required, flush_interval_s, flush_at, max_queue,
-## handle_quit, quit_timeout_s, debug.
+## handle_quit, quit_timeout_s, capture_engine_errors, capture_warnings,
+## max_auto_errors_per_session, debug.
 func init(options: Dictionary) -> void:
 	if _initialized:
 		push_warning("UntitledAnalytics: init() was already called")
@@ -106,6 +138,8 @@ func init(options: Dictionary) -> void:
 	add_child(_timer)
 	if _options.handle_quit:
 		get_tree().set_auto_accept_quit(false)
+	if _options.capture_engine_errors:
+		_install_error_logger()
 	if _identity_allowed():
 		_start_identity()
 
@@ -119,6 +153,26 @@ func track(event: String, properties: Dictionary = {}) -> void:
 		return
 	_touch()
 	_enqueue(_build("track", event, _scalars(properties)))
+
+
+## Record an error as an `error` event. Options (all optional):
+##   severity     debug, info, warning, error (default) or critical
+##   error_type   the error class, for example "SaveFailed"
+##   handled      false when the game could not recover (default true)
+##   stack        a stack trace text (cut to 1024 characters)
+##   file, line, function   where the error happened
+##   fingerprint  your own grouping key; by default a hash of error_type and
+##                file and function, or of the message without numbers
+##   properties   more scalar properties (level, mode, ...)
+func track_error(message: String, options: Dictionary = {}) -> void:
+	_record_error(message, options, "manual")
+
+
+## A function that gets the properties of each `error` event before it is
+## queued. Return a Dictionary to send (for example without personal data),
+## or null to drop the error. Pass Callable() to remove it.
+func set_before_send(callback: Callable) -> void:
+	_before_send = callback
 
 
 ## Attach a known player ID (1 to 255 characters) and traits to this device.
@@ -280,9 +334,41 @@ func _close() -> void:
 
 
 func _exit_tree() -> void:
+	if _error_logger != null:
+		OS.remove_logger(_error_logger)
+		_error_logger = null
 	if _initialized:
 		_save_session()
+		# The game quit without shutdown(): a normal exit, not a crash.
+		if _cfg.has_section("session"):
+			_cfg.set_value("session", "exited", true)
+			_save_cfg()
 		_save_queue()
+
+
+func _ready() -> void:
+	set_process(false)
+
+
+## Send the errors that the engine logger collected (main thread).
+func _process(_delta: float) -> void:
+	if _error_logger == null:
+		return
+	var taken: Array = _error_logger.take()
+	var items: Array = taken[0]
+	_errors_dropped += int(taken[1]) + maxi(0, items.size() - AUTO_ERRORS_PER_FRAME)
+	for item in items.slice(0, AUTO_ERRORS_PER_FRAME):
+		var kind := String(item.kind)
+		_record_error(String(item.message), {
+			"severity": "warning" if kind == "warning" else "error",
+			"error_type": "engine_warning" if kind == "warning" else ("script_error" if kind == "script" else "engine_error"),
+			"handled": false,
+			"stack": String(item.stack),
+			"file": String(item.file),
+			"line": int(item.line),
+			"function": String(item.function),
+			"properties": {"engine_error_type": kind},
+		}, "godot_logger")
 
 
 func _on_tick() -> void:
@@ -328,6 +414,16 @@ func _start_identity() -> void:
 		_session_id = previous
 		_session_started_at = float(_cfg.get_value("session", "started_at", now))
 		_last_activity_at = float(_cfg.get_value("session", "last_activity_at", _session_started_at))
+		# No normal exit and the game had focus: count it as a crash (as the
+		# Sentry "abnormal" session). A game the OS closed in the background
+		# is not a crash.
+		if not bool(_cfg.get_value("session", "exited", false)) and bool(_cfg.get_value("session", "focused", true)):
+			var crash := {"previous_session_id": previous}
+			for key in ["build", "app_version"]:
+				var value := String(_cfg.get_value("session", key, ""))
+				if value != "":
+					crash["previous_" + key] = value
+			_enqueue(_build("track", "app_unclean_exit", crash, _last_activity_at))
 		_end_session(_last_activity_at)
 	_start_session(now)
 	_enqueue(_build("track", "game_open", {"is_first_open": first_open, "first_open_at": String(_cfg.get_value("identity", "first_open_at", _iso(now)))}))
@@ -343,6 +439,7 @@ func _start_session(at: float) -> void:
 	_session_id = _uuid()
 	_session_started_at = at
 	_last_activity_at = at
+	_auto_errors = 0
 	_save_session()
 	_enqueue(_build("track", "session_start", {}, at))
 
@@ -351,7 +448,11 @@ func _end_session(at: float) -> void:
 	if _session_id == "":
 		return
 	var duration := maxf(0.0, at - _session_started_at)
-	_enqueue(_build("track", "session_end", {"duration_s": int(round(duration))}, at))
+	var ended := {"duration_s": int(round(duration))}
+	if _errors_dropped > 0:
+		ended["errors_dropped"] = _errors_dropped
+		_errors_dropped = 0
+	_enqueue(_build("track", "session_end", ended, at))
 	_session_id = ""
 	if _cfg.has_section("session"):
 		_cfg.erase_section("session")
@@ -375,6 +476,10 @@ func _save_session() -> void:
 	_cfg.set_value("session", "id", _session_id)
 	_cfg.set_value("session", "started_at", _session_started_at)
 	_cfg.set_value("session", "last_activity_at", _last_activity_at)
+	_cfg.set_value("session", "focused", _focused)
+	_cfg.set_value("session", "exited", false)
+	_cfg.set_value("session", "build", String(_options.build))
+	_cfg.set_value("session", "app_version", String(_options.app_version))
 	_save_cfg()
 
 
@@ -422,6 +527,11 @@ func _context() -> Dictionary:
 
 
 func _enqueue(entry: Dictionary) -> void:
+	var name := String(entry.event.get("event", ""))
+	if entry.event.type == "track" and name != "error":
+		_breadcrumbs.append(name)
+		if _breadcrumbs.size() > BREADCRUMBS:
+			_breadcrumbs.pop_front()
 	_queue.append(entry)
 	var overflow := _queue.size() - int(_options.max_queue)
 	if overflow > 0:
@@ -494,6 +604,103 @@ func _save_queue() -> void:
 	file.store_string(JSON.stringify(_queue))
 	file.close()
 	_queue_dirty = false
+
+
+# Errors ----------------------------------------------------------------------
+
+func _install_error_logger() -> void:
+	if not ClassDB.class_exists("Logger") or not OS.has_method("add_logger"):
+		if _options.debug:
+			print("UntitledAnalytics: engine error capture needs Godot 4.5 or later")
+		return
+	var script = load(ERROR_LOGGER_PATH)
+	if script == null:
+		return
+	_error_logger = script.new()
+	_error_logger.capture_warnings = bool(_options.capture_warnings)
+	OS.add_logger(_error_logger)
+	set_process(true)
+
+
+func _record_error(message: String, options: Dictionary, source: String) -> void:
+	if not _initialized or not _identity_active:
+		if source == "manual":
+			_ready_to_record()  # Warns before init().
+		return
+	var severity := String(options.get("severity", "error"))
+	if not SEVERITIES.has(severity):
+		severity = "error"
+	var error_type := String(options.get("error_type", "")).left(128)
+	var file := String(options.get("file", "")).left(256)
+	var function := String(options.get("function", "")).left(256)
+	var props := _scalars(options.get("properties", {}) if typeof(options.get("properties")) == TYPE_DICTIONARY else {})
+	props.merge({
+		"severity": severity,
+		"message": message.left(MAX_STRING),
+		"handled": bool(options.get("handled", true)),
+		"source": source,
+		"fingerprint": String(options.get("fingerprint", "")).left(128),
+	}, true)
+	if props.fingerprint == "":
+		props.fingerprint = _fingerprint(error_type, message, file, function)
+	if error_type != "":
+		props["error_type"] = error_type
+	if file != "":
+		props["file"] = file
+		props["line"] = int(options.get("line", 0))
+	if function != "":
+		props["function"] = function
+	var stack := String(options.get("stack", ""))
+	if stack != "":
+		props["stack"] = stack.left(MAX_STRING)
+	if not _breadcrumbs.is_empty():
+		props["breadcrumbs"] = ",".join(_breadcrumbs).right(MAX_STRING)
+	if not _error_allowed(String(props.fingerprint), source):
+		_errors_dropped += 1
+		return
+	if _before_send.is_valid():
+		var changed = _before_send.call(props)
+		if changed == null:
+			return
+		if typeof(changed) != TYPE_DICTIONARY:
+			push_warning("UntitledAnalytics: before_send must return a Dictionary or null; error dropped")
+			return
+		props = _scalars(changed)
+	if source != "manual":
+		_auto_errors += 1
+	_touch()
+	_enqueue(_build("track", "error", props))
+	# Keep the error on disk now: a crash can follow it.
+	_save_queue()
+
+
+## The limits. Manual errors skip only the per-session cap.
+func _error_allowed(fingerprint: String, source: String) -> bool:
+	var now := Time.get_ticks_msec()
+	if _error_seen.has(fingerprint) and now - int(_error_seen[fingerprint]) < ERROR_DEDUPE_MS:
+		return false
+	_error_times = _error_times.filter(func(at): return now - int(at) < ERROR_WINDOW_MS)
+	if _error_times.size() >= ERROR_WINDOW_MAX:
+		return false
+	if source != "manual" and _auto_errors >= int(_options.max_auto_errors_per_session):
+		return false
+	_error_seen[fingerprint] = now
+	_error_times.append(now)
+	if _error_seen.size() > 500:
+		_error_seen.clear()
+	return true
+
+
+## Group errors as PostHog and Sentry do: the error type and the place in the
+## code (no line number, so an edit above it keeps the group), else the
+## message without numbers and quoted values.
+func _fingerprint(error_type: String, message: String, file: String, function: String) -> String:
+	var basis := ""
+	if file != "" or function != "":
+		basis = "%s|%s|%s" % [error_type, file, function]
+	else:
+		basis = "%s|%s" % [error_type, _number_re.sub(_quoted_re.sub(message, "?", true), "N", true)]
+	return basis.sha1_text().left(16)
 
 
 # Helpers ---------------------------------------------------------------------
