@@ -33,6 +33,7 @@ func _on_signed_in(player_id: String) -> void:
 | `init(options)` | Starts the SDK. Sends `session_start` and `game_open` (`is_first_open`, `first_open_at`). |
 | `track(event, properties)` | Records an event. Property values are String, int, float, bool or null; other values are dropped. |
 | `identify(user_id, traits)` | Attaches a player ID (kept on disk) and traits. |
+| `link_url(url)` | Adds the handoff parameter (`ua_hid`) to a website URL, so the website joins this player without `identify()`. Use it with `OS.shell_open()`. Unchanged before consent. |
 | `reset()` | Ends the session, forgets the player ID, makes a new anonymous ID and starts a new session. |
 | `set_consent(granted)` | Consent mode. `true` starts tracking; `false` deletes the ID, the session and the queue. |
 | `track_error(message, options)` | Sends an `error` event. Options: `severity`, `error_type`, `handled`, `stack`, `file`, `line`, `function`, `fingerprint`, `properties`. |
