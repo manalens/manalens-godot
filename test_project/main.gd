@@ -1,7 +1,7 @@
 extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
-##   --write-key=KEY      a project write key (required)
+##   --write-key=KEY      a project publishable key (required)
 ##   --mode=MODE          offline (default), consent, recovery or errors
 ##   --run-id=ID          tag for the events (default: random)
 ##

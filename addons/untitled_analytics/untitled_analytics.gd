@@ -1,12 +1,12 @@
 extends Node
 ## Untitled Analytics for Godot 4 (autoload singleton `UntitledAnalytics`).
 ##
-## Sends game events to `POST /v0/events` with the public project write key,
+## Sends game events to `POST /v0/events` with the project publishable key,
 ## the same envelope as the Untitled Analytics web SDK, and `context.app` in
 ## place of `context.page`.
 ##
 ##   UntitledAnalytics.init({
-##       "write_key": "ua_...",
+##       "write_key": "ua_pk_...",  # the publishable key
 ##       "endpoint": "https://collector.example.com",
 ##       "app_version": "1.4.0", "build": "571", "storefront": "steam",
 ##   })
@@ -117,6 +117,12 @@ func init(options: Dictionary) -> void:
 			push_warning("UntitledAnalytics: unknown option %s" % key)
 	if String(_options.write_key) == "" or String(_options.endpoint) == "":
 		push_error("UntitledAnalytics: write_key and endpoint are required")
+		return
+	# write_key takes the publishable key. A secret key (ua_sk_) or an API key
+	# (ua_api_, ua_mcp_) must never ship in a game build.
+	var key := String(_options.write_key)
+	if key.begins_with("ua_sk_") or key.begins_with("ua_api_") or key.begins_with("ua_mcp_"):
+		push_error("UntitledAnalytics: write_key must be the publishable key (ua_pk_...). Never put a secret key or an API key in a game build")
 		return
 	_options.flush_at = clampi(int(_options.flush_at), 1, 50)
 	_options.max_queue = maxi(int(_options.max_queue), int(_options.flush_at))

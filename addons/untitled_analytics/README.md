@@ -2,7 +2,7 @@
 
 Game analytics for Godot 4 in plain GDScript (no native code). It works on every export target that has `HTTPRequest`: Windows, macOS, Linux, Android, iOS and Web.
 
-It sends events to the Untitled Analytics collector (`POST /v0/events`) with your project's public **write key**, in the same envelope as the web SDK, with `context.app` in place of `context.page`. See the docs page `docs/sdks/godot.mdx` and `docs/sdks/app-events.mdx` in the Untitled Analytics repository.
+It sends events to the Untitled Analytics collector (`POST /v0/events`) with your project's **Publishable key** (the `write_key` option). The Publishable key is safe to ship in a game build. Never put a Secret key or an API key in a build. Events go in the same envelope as the web SDK, with `context.app` in place of `context.page`. See the docs page `docs/sdks/godot.mdx` and `docs/sdks/app-events.mdx` in the Untitled Analytics repository.
 
 ## Install
 
@@ -14,7 +14,7 @@ It sends events to the Untitled Analytics collector (`POST /v0/events`) with you
 ```gdscript
 func _ready() -> void:
     UntitledAnalytics.init({
-        "write_key": "ua_your_write_key",
+        "write_key": "YOUR_PUBLISHABLE_KEY",
         "endpoint": "https://your-collector.example.com",
         "app_version": "1.4.0",
         "build": "571",
