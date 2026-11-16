@@ -24,6 +24,12 @@ extends Node
 ## sends `app_unclean_exit` in that old session.
 
 signal flushed(sent: int, ok: bool)
+## Events were dropped and will never be sent. `status` is the HTTP status
+## when the collector refused a batch (a 4xx other than 408 and 429), or 0 when
+## the SDK dropped events itself (the queue was over max_queue, or events were
+## older than 7 days). `dropped` is the number of events. Network errors and 5xx
+## responses do not emit it: those events stay queued and are sent later.
+signal send_failed(status: int, dropped: int)
 
 const LIBRARY_NAME := "Untitled Analytics Godot SDK"
 const LIBRARY_VERSION := "0.1.0"
@@ -49,6 +55,10 @@ const MAX_STRING := 1024
 const HANDOFF_PARAM := "ua_hid"
 
 var _options := {
+	## false: the SDK sends nothing, writes no files and keeps no ID. Use
+	## `"enabled": not OS.has_feature("editor")` to keep editor runs out of
+	## your reports.
+	"enabled": true,
 	## The project publishable key (`ua_pk_...`). `write_key` is its old name
 	## and still works (deprecated).
 	"publishable_key": "",
@@ -74,6 +84,8 @@ var _options := {
 	"debug": false,
 }
 var _initialized := false
+## true when init() ran with enabled = false: every call is a no-op.
+var _disabled := false
 var _warned_write_key := false
 var _identity_active := false
 var _cfg := ConfigFile.new()
@@ -107,7 +119,7 @@ var _quoted_re := RegEx.create_from_string("\"[^\"]*\"|'[^']*'")
 
 # Public API ------------------------------------------------------------------
 
-## Start the SDK. Keys: publishable_key, endpoint (required); app_version, build,
+## Start the SDK. Keys: publishable_key, endpoint (required); enabled, app_version, build,
 ## storefront, consent_required, flush_interval_s, flush_at, max_queue,
 ## handle_quit, quit_timeout_s, capture_engine_errors, capture_warnings,
 ## max_auto_errors_per_session, debug. `write_key` is the old name of
@@ -134,6 +146,13 @@ func init(options: Dictionary) -> void:
 			return
 		if current == "":
 			_options.publishable_key = legacy
+	if not bool(_options.enabled):
+		# Turned off (for example in the editor): every call is a silent no-op.
+		_disabled = true
+		_initialized = true
+		if _options.debug:
+			print("UntitledAnalytics: disabled (enabled = false); no events are sent")
+		return
 	if String(_options.publishable_key) == "" or String(_options.endpoint) == "":
 		push_error("UntitledAnalytics: publishable_key and endpoint are required")
 		return
@@ -201,6 +220,8 @@ func set_before_send(callback: Callable) -> void:
 
 ## Attach a known player ID (1 to 255 characters) and traits to this device.
 func identify(user_id: String, traits: Dictionary = {}) -> void:
+	if _disabled:
+		return
 	if not _initialized:
 		push_warning("UntitledAnalytics: call init() first")
 		return
@@ -239,6 +260,8 @@ func reset() -> void:
 ## Consent mode: true starts the persistent identity and sends game_open;
 ## false deletes the ID, the session and every queued event.
 func set_consent(granted: bool) -> void:
+	if _disabled:
+		return
 	_cfg.set_value("consent", "granted", granted)
 	if not _initialized:
 		return
@@ -353,7 +376,7 @@ func is_sending() -> bool:
 # Lifecycle -------------------------------------------------------------------
 
 func _notification(what: int) -> void:
-	if not _initialized:
+	if not _initialized or _disabled:
 		return
 	match what:
 		NOTIFICATION_WM_CLOSE_REQUEST:
@@ -384,7 +407,7 @@ func _exit_tree() -> void:
 	if _error_logger != null:
 		OS.remove_logger(_error_logger)
 		_error_logger = null
-	if _initialized:
+	if _initialized and not _disabled:
 		_save_session()
 		# The game quit without shutdown(): a normal exit, not a crash.
 		if _cfg.has_section("session"):
@@ -583,6 +606,7 @@ func _enqueue(entry: Dictionary) -> void:
 	var overflow := _queue.size() - int(_options.max_queue)
 	if overflow > 0:
 		_queue = _queue.slice(overflow)
+		send_failed.emit(0, overflow)
 	_queue_dirty = true
 	if _options.debug:
 		print("UntitledAnalytics: queued %s %s" % [entry.event.type, entry.event.get("event", "")])
@@ -596,6 +620,7 @@ func _prune() -> void:
 	var oldest := _now() - MAX_EVENT_AGE_S
 	var kept := _queue.filter(func(entry): return float(entry.at) >= oldest)
 	if kept.size() != _queue.size():
+		send_failed.emit(0, _queue.size() - kept.size())
 		_queue = kept
 		_queue_dirty = true
 
@@ -616,6 +641,7 @@ func _on_request_completed(result: int, code: int, _headers: PackedStringArray, 
 		_backoff_until = 0.0
 		if rejected:
 			push_warning("UntitledAnalytics: collector refused %d events (HTTP %d)" % [count, code])
+			send_failed.emit(code, count)
 	else:
 		_failures += 1
 		var delay := minf(MAX_BACKOFF_S, pow(2.0, float(_failures)))

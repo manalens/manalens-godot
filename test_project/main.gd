@@ -4,7 +4,7 @@ extends Node
 ##   --publishable-key=KEY  a project publishable key (required; --write-key=KEY,
 ##                          the old name, passes the key as the deprecated
 ##                          write_key option)
-##   --mode=MODE          offline (default), consent, recovery, errors or link
+##   --mode=MODE          offline (default), consent, recovery, errors, link, disabled or overflow
 ##   --run-id=ID          tag for the events (default: random)
 ##
 ## offline:  fresh state; queue events against a dead endpoint, check they are
@@ -43,6 +43,8 @@ func _ready() -> void:
 		"recovery": await _recovery(run_id, result)
 		"errors": await _errors(run_id, result)
 		"link": await _link(run_id, result)
+		"disabled": await _disabled(run_id, result)
+		"overflow": await _overflow(run_id, result)
 		_: _failures.append("unknown mode %s" % mode)
 	_finish(result)
 
@@ -182,6 +184,45 @@ func _errors(run_id: String, result: Dictionary) -> void:
 
 func _engine_error() -> void:
 	push_error("Engine boom in wave 7")
+
+
+## enabled = false: every call is a no-op. No ID, no queue, no files.
+func _disabled(run_id: String, result: Dictionary) -> void:
+	_fresh()
+	var sdk = UntitledAnalytics
+	var options := _options(String(_args["endpoint"]))
+	options["enabled"] = false
+	sdk.init(options)
+	sdk.track("test_disabled", {"run_id": run_id})
+	sdk.track_error("should not send", {"error_type": "Disabled"})
+	sdk.identify("disabled-player")
+	sdk.set_consent(true)
+	sdk.flush()
+	await get_tree().create_timer(1.5).timeout
+	var url := "https://example.com/wiki"
+	_check(sdk.get_anonymous_id() == "", "disabled: an anonymous ID was made")
+	_check(sdk.get_queue_size() == 0, "disabled: events were queued")
+	_check(sdk.link_url(url) == url, "disabled: link_url added an ID")
+	_check(not FileAccess.file_exists("user://untitled_analytics.cfg"), "disabled: the config file was written")
+	_check(not FileAccess.file_exists("user://untitled_analytics_queue.json"), "disabled: the queue file was written")
+
+
+## send_failed(0, n) when the queue is over max_queue.
+func _overflow(run_id: String, result: Dictionary) -> void:
+	_fresh()
+	var sdk = UntitledAnalytics
+	var dropped := [0]
+	sdk.send_failed.connect(func(status: int, count: int): if status == 0: dropped[0] += count)
+	var options := _options(OFFLINE_ENDPOINT)
+	options["flush_at"] = 2
+	options["max_queue"] = 2
+	sdk.init(options)
+	for i in 5:
+		sdk.track("overflow_%d" % i, {"run_id": run_id})
+	result["dropped"] = dropped[0]
+	_check(dropped[0] > 0, "overflow: send_failed was not emitted for dropped events")
+	_check(sdk.get_queue_size() <= 2, "overflow: queue is over max_queue")
+	_fresh()
 
 
 func _fresh() -> void:

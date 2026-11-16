@@ -41,7 +41,7 @@ func _on_signed_in(player_id: String) -> void:
 | `flush()` | Sends queued events now. |
 | `await shutdown()` | Sends `session_end` and flushes, for at most `quit_timeout_s`. |
 
-Options: `publishable_key` and `endpoint` (required; `write_key` is the old name of `publishable_key` and still works, with a deprecation warning), `app_version`, `build`, `storefront`, `consent_required` (false), `flush_interval_s` (10), `flush_at` (20, also the batch size), `max_queue` (1000), `handle_quit` (true), `quit_timeout_s` (2), `capture_engine_errors` (true, Godot 4.5+), `capture_warnings` (false), `max_auto_errors_per_session` (50), `debug` (false).
+Options: `enabled` (true; use `not OS.has_feature("editor")` to keep editor runs out of reports), `publishable_key` and `endpoint` (required; `write_key` is the old name of `publishable_key` and still works, with a deprecation warning), `app_version`, `build`, `storefront`, `consent_required` (false), `flush_interval_s` (10), `flush_at` (20, also the batch size), `max_queue` (1000), `handle_quit` (true), `quit_timeout_s` (2), `capture_engine_errors` (true, Godot 4.5+), `capture_warnings` (false), `max_auto_errors_per_session` (50), `debug` (false).
 
 ## How it works
 
