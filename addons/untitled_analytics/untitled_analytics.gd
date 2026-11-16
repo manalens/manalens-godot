@@ -35,6 +35,9 @@ const LIBRARY_NAME := "Untitled Analytics Godot SDK"
 const LIBRARY_VERSION := "0.1.0"
 const CONFIG_PATH := "user://untitled_analytics.cfg"
 const QUEUE_PATH := "user://untitled_analytics_queue.json"
+## Written by set_consent(false). While it exists the SDK records nothing,
+## whatever the config file says (fail closed if that file is lost or damaged).
+const OPTOUT_PATH := "user://untitled_analytics_optout"
 const SESSION_TIMEOUT_S := 30.0 * 60.0
 ## The collector accepts app events up to 7 days old. Keep a margin for clock skew.
 const MAX_EVENT_AGE_S := 7.0 * 24.0 * 3600.0 - 3600.0
@@ -86,6 +89,11 @@ var _options := {
 var _initialized := false
 ## true when init() ran with enabled = false: every call is a no-op.
 var _disabled := false
+## The config file exists but could not be read: it may hold an opt-out, so
+## record nothing this run and never overwrite it (until set_consent(true)).
+var _state_unreadable := false
+## set_consent(false) could not write the opt-out marker: stay off, retry.
+var _optout_pending := false
 var _warned_write_key := false
 var _identity_active := false
 var _cfg := ConfigFile.new()
@@ -169,7 +177,15 @@ func init(options: Dictionary) -> void:
 		push_warning("UntitledAnalytics: storefront must be one of %s; ignored" % [STOREFRONTS])
 		_options.storefront = ""
 	_initialized = true
-	_cfg.load(CONFIG_PATH)  # A missing file is fine.
+	if FileAccess.file_exists(CONFIG_PATH):
+		var load_error := _cfg.load(CONFIG_PATH)
+		if load_error != OK:
+			# Fail closed: keep a copy, record nothing, and never overwrite the file.
+			_state_unreadable = true
+			_cfg = ConfigFile.new()
+			DirAccess.copy_absolute(CONFIG_PATH, CONFIG_PATH + ".unreadable")
+			push_warning("UntitledAnalytics: could not read %s (error %d); no events until set_consent(true)" % [CONFIG_PATH, load_error])
+	# A missing file is a first run.
 	_http = HTTPRequest.new()
 	_http.timeout = 10.0
 	_http.request_completed.connect(_on_request_completed)
@@ -262,6 +278,15 @@ func reset() -> void:
 func set_consent(granted: bool) -> void:
 	if _disabled:
 		return
+	if granted:
+		if FileAccess.file_exists(OPTOUT_PATH) and DirAccess.remove_absolute(OPTOUT_PATH) != OK:
+			push_warning("UntitledAnalytics: could not remove the opt-out marker; tracking stays off")
+			return
+		_optout_pending = false
+		# An unreadable config is replaced by a new one after an explicit opt-in.
+		_state_unreadable = false
+	else:
+		_write_optout()
 	_cfg.set_value("consent", "granted", granted)
 	if not _initialized:
 		return
@@ -442,6 +467,8 @@ func _process(_delta: float) -> void:
 
 
 func _on_tick() -> void:
+	if _optout_pending:
+		_write_optout()
 	if not _identity_active:
 		return
 	# While the game has focus the player is active: keep the session alive.
@@ -455,6 +482,8 @@ func _on_tick() -> void:
 # Identity and sessions -------------------------------------------------------
 
 func _identity_allowed() -> bool:
+	if _state_unreadable or _optout_pending or FileAccess.file_exists(OPTOUT_PATH):
+		return false
 	if _cfg.has_section_key("consent", "granted"):
 		return bool(_cfg.get_value("consent", "granted"))
 	return not _options.consent_required
@@ -554,9 +583,29 @@ func _save_session() -> void:
 
 
 func _save_cfg() -> void:
-	var error := _cfg.save(CONFIG_PATH)
+	if _state_unreadable:
+		return  # Never overwrite a config that could not be read.
+	# Write a temp file, then rename, so a crash never leaves a cut-off config.
+	var tmp := CONFIG_PATH + ".tmp"
+	var error := _cfg.save(tmp)
+	if error == OK:
+		error = DirAccess.rename_absolute(tmp, CONFIG_PATH)
 	if error != OK and _options.debug:
 		push_warning("UntitledAnalytics: could not save %s (%s)" % [CONFIG_PATH, error])
+
+
+## Write the opt-out marker (temp file, then rename). On failure stay off and retry.
+func _write_optout() -> void:
+	var tmp := OPTOUT_PATH + ".tmp"
+	var file := FileAccess.open(tmp, FileAccess.WRITE)
+	var ok := file != null
+	if ok:
+		file.store_string("opted out\n")
+		file.close()
+		ok = DirAccess.rename_absolute(tmp, OPTOUT_PATH) == OK
+	_optout_pending = not ok
+	if not ok:
+		push_warning("UntitledAnalytics: could not write the opt-out marker; tracking stays off and the write is retried")
 
 
 # Events and queue ------------------------------------------------------------

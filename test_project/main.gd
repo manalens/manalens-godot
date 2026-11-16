@@ -4,7 +4,7 @@ extends Node
 ##   --publishable-key=KEY  a project publishable key (required; --write-key=KEY,
 ##                          the old name, passes the key as the deprecated
 ##                          write_key option)
-##   --mode=MODE          offline (default), consent, recovery, errors, link, disabled or overflow
+##   --mode=MODE          offline (default), consent, recovery, errors, link, disabled, overflow, optout, corrupt or marker
 ##   --run-id=ID          tag for the events (default: random)
 ##
 ## offline:  fresh state; queue events against a dead endpoint, check they are
@@ -45,6 +45,9 @@ func _ready() -> void:
 		"link": await _link(run_id, result)
 		"disabled": await _disabled(run_id, result)
 		"overflow": await _overflow(run_id, result)
+		"optout": await _optout(run_id, result)
+		"corrupt": await _corrupt(run_id, result)
+		"marker": await _marker(run_id, result)
 		_: _failures.append("unknown mode %s" % mode)
 	_finish(result)
 
@@ -225,8 +228,55 @@ func _overflow(run_id: String, result: Dictionary) -> void:
 	_fresh()
 
 
+## set_consent(false) writes the opt-out marker and clears the ID.
+func _optout(run_id: String, result: Dictionary) -> void:
+	_fresh()
+	var sdk = UntitledAnalytics
+	sdk.init(_options(OFFLINE_ENDPOINT))
+	_check(sdk.get_anonymous_id() != "", "optout: no ID before opt-out")
+	sdk.set_consent(false)
+	sdk.track("after_optout", {"run_id": run_id})
+	_check(FileAccess.file_exists("user://untitled_analytics_optout"), "optout: the marker was not written")
+	_check(sdk.get_anonymous_id() == "", "optout: the ID was kept")
+	_check(sdk.get_queue_size() == 0, "optout: events were queued")
+	_fresh()
+
+
+## A config file that exists but cannot be read: record nothing, keep the file.
+func _corrupt(run_id: String, result: Dictionary) -> void:
+	_fresh()
+	var garbage := "[consent\ngranted = fal"
+	var file := FileAccess.open("user://untitled_analytics.cfg", FileAccess.WRITE)
+	file.store_string(garbage)
+	file.close()
+	var sdk = UntitledAnalytics
+	sdk.init(_options(OFFLINE_ENDPOINT))
+	sdk.track("after_corrupt", {"run_id": run_id})
+	_check(sdk.get_anonymous_id() == "", "corrupt: an ID was made")
+	_check(sdk.get_queue_size() == 0, "corrupt: events were queued")
+	_check(FileAccess.get_file_as_string("user://untitled_analytics.cfg") == garbage, "corrupt: the config file was overwritten")
+	_check(FileAccess.file_exists("user://untitled_analytics.cfg.unreadable"), "corrupt: no copy was kept")
+	sdk.set_consent(true)
+	_check(sdk.get_anonymous_id() != "", "corrupt: set_consent(true) did not start tracking")
+	_fresh()
+
+
+## The opt-out marker wins when the config file is missing.
+func _marker(run_id: String, result: Dictionary) -> void:
+	_fresh()
+	var file := FileAccess.open("user://untitled_analytics_optout", FileAccess.WRITE)
+	file.store_string("opted out\n")
+	file.close()
+	var sdk = UntitledAnalytics
+	sdk.init(_options(OFFLINE_ENDPOINT))
+	sdk.track("after_marker", {"run_id": run_id})
+	_check(sdk.get_anonymous_id() == "", "marker: an ID was made")
+	_check(sdk.get_queue_size() == 0, "marker: events were queued")
+	_fresh()
+
+
 func _fresh() -> void:
-	for path in ["user://untitled_analytics.cfg", "user://untitled_analytics_queue.json"]:
+	for path in ["user://untitled_analytics.cfg", "user://untitled_analytics_queue.json", "user://untitled_analytics_optout", "user://untitled_analytics.cfg.unreadable", "user://untitled_analytics.cfg.tmp"]:
 		if FileAccess.file_exists(path):
 			DirAccess.remove_absolute(path)
 
