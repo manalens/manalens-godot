@@ -637,12 +637,18 @@ func _context() -> Dictionary:
 	for key in ["app_version", "build", "storefront"]:
 		if String(_options[key]) != "":
 			app[key] = String(_options[key])
-	return {
+	var context := {
 		"app": app,
 		"locale": OS.get_locale().replace("_", "-").left(32),
 		"library_name": LIBRARY_NAME,
 		"library_version": LIBRARY_VERSION,
 	}
+	# The clock's offset from UTC in minutes (480 for UTC+8). The collector uses
+	# it only to match an install to a website visit, and accepts -720 to 840.
+	var offset := int(Time.get_time_zone_from_system().get("bias", 9999))
+	if offset >= -720 and offset <= 840:
+		context["utc_offset"] = offset
+	return context
 
 
 func _enqueue(entry: Dictionary) -> void:
