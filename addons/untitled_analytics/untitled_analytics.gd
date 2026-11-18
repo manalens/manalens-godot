@@ -39,6 +39,9 @@ const QUEUE_PATH := "user://untitled_analytics_queue.json"
 ## whatever the config file says (fail closed if that file is lost or damaged).
 const OPTOUT_PATH := "user://untitled_analytics_optout"
 const SESSION_TIMEOUT_S := 30.0 * 60.0
+## A session is never older than this. A game that stays open gets a
+## session_end and a session_start every 24 hours.
+const SESSION_MAX_AGE_S := 24.0 * 60.0 * 60.0
 ## The collector accepts app events up to 7 days old. Keep a margin for clock skew.
 const MAX_EVENT_AGE_S := 7.0 * 24.0 * 3600.0 - 3600.0
 const MAX_BACKOFF_S := 300.0
@@ -558,13 +561,20 @@ func _end_session(at: float) -> void:
 	_save_cfg()
 
 
-## Record activity. Rotates the session after 30 minutes without activity.
+## Record activity. Rotates the session after 30 minutes without activity,
+## and when the session is 24 hours old (the collector's session rule does not
+## use a client session of more than 24 hours).
 func _touch() -> void:
 	var now := _now()
 	if _session_id == "":
 		_start_session(now)
 	elif now - _last_activity_at > SESSION_TIMEOUT_S:
 		_end_session(_last_activity_at)
+		_start_session(now)
+	elif now - _session_started_at >= SESSION_MAX_AGE_S:
+		if _options.debug:
+			print("UntitledAnalytics: the session is 24 hours old; a new session starts")
+		_end_session(now)
 		_start_session(now)
 	_last_activity_at = now
 
@@ -680,6 +690,28 @@ func _prune() -> void:
 		_queue_dirty = true
 
 
+## The reason of a refusal from the response body: the message, and the
+## reason code of each refused event (for example SESSION_ID_REQUIRED).
+func _refusal_reason(body: PackedByteArray) -> String:
+	# JSON.new().parse() does not log an engine error for a body that is not JSON.
+	var json := JSON.new()
+	if json.parse(body.get_string_from_utf8()) != OK:
+		return ""
+	var parsed = json.data
+	if typeof(parsed) != TYPE_DICTIONARY or typeof(parsed.get("error")) != TYPE_DICTIONARY:
+		return ""
+	var error: Dictionary = parsed.error
+	var reason := "%s: %s" % [String(error.get("code", "")), String(error.get("message", ""))]
+	var codes := {}
+	if typeof(error.get("refused")) == TYPE_ARRAY:
+		for item in error.refused:
+			if typeof(item) == TYPE_DICTIONARY:
+				codes[String(item.get("code", ""))] = true
+	if not codes.is_empty():
+		reason += " (%s)" % ", ".join(PackedStringArray(codes.keys()))
+	return reason
+
+
 func _on_request_completed(result: int, code: int, _headers: PackedStringArray, _body: PackedByteArray) -> void:
 	var count := _in_flight.size()
 	var ok := result == HTTPRequest.RESULT_SUCCESS and code >= 200 and code < 300
@@ -695,7 +727,9 @@ func _on_request_completed(result: int, code: int, _headers: PackedStringArray, 
 		_failures = 0
 		_backoff_until = 0.0
 		if rejected:
-			push_warning("UntitledAnalytics: collector refused %d events (HTTP %d)" % [count, code])
+			# Dropped, not sent again: the same batch would be refused again.
+			var reason := _refusal_reason(_body)
+			push_warning("UntitledAnalytics: collector refused %d events (HTTP %d)%s; they are dropped" % [count, code, "" if reason == "" else " " + reason])
 			send_failed.emit(code, count)
 	else:
 		_failures += 1

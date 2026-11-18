@@ -4,7 +4,7 @@ extends Node
 ##   --publishable-key=KEY  a project publishable key (required; --write-key=KEY,
 ##                          the old name, passes the key as the deprecated
 ##                          write_key option)
-##   --mode=MODE          offline (default), consent, recovery, errors, link, disabled, overflow, optout, corrupt or marker
+##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, disabled, overflow, optout, corrupt or marker
 ##   --run-id=ID          tag for the events (default: random)
 ##
 ## offline:  fresh state; queue events against a dead endpoint, check they are
@@ -19,6 +19,10 @@ extends Node
 ##
 ## link:     link_url() before and after consent (handoff parameter, query and
 ##           fragment kept); needs no network.
+##
+## session_age: a session that is 24 hours old ends and a new one starts; every
+##           queued event has a session ID that is not the anonymous ID; the
+##           reason of a refusal is read from the response body. Needs no network.
 ##
 ## Prints one line `UA_RESULT {json}` and exits 0 on success, 1 on failure.
 
@@ -43,6 +47,7 @@ func _ready() -> void:
 		"recovery": await _recovery(run_id, result)
 		"errors": await _errors(run_id, result)
 		"link": await _link(run_id, result)
+		"session_age": await _session_age(run_id, result)
 		"disabled": await _disabled(run_id, result)
 		"overflow": await _overflow(run_id, result)
 		"optout": await _optout(run_id, result)
@@ -136,6 +141,44 @@ func _link(_run_id: String, result: Dictionary) -> void:
 	sdk.reset()
 	_check(not sdk.link_url(url).contains(id), "link_url kept the old ID after reset()")
 	await sdk.shutdown()
+
+
+func _session_age(_run_id: String, result: Dictionary) -> void:
+	_fresh()
+	var sdk = UntitledAnalytics
+	sdk.init(_options(OFFLINE_ENDPOINT))
+	var first: String = sdk.get_session_id()
+	# 23 hours old: the same session.
+	sdk._session_started_at = sdk._now() - 23.0 * 3600.0
+	sdk.track("before_a_day", {})
+	_check(sdk.get_session_id() == first, "the session changed before it was 24 hours old")
+	# 24 hours old: session_end, then a new session.
+	sdk._session_started_at = sdk._now() - 24.0 * 3600.0
+	sdk.track("after_a_day", {})
+	var second: String = sdk.get_session_id()
+	_check(second != first and second != "", "no new session at 24 hours")
+	var by_name := {}
+	for entry in sdk._queue:
+		var event: Dictionary = entry.event
+		_check(String(event.get("session_id", "")) != "", "%s has no session_id" % String(event.get("event", event.type)))
+		_check(String(event.get("session_id", "")) != String(event.anonymous_id), "%s has the anonymous ID as its session_id" % String(event.get("event", event.type)))
+		if not by_name.has(String(event.get("event", ""))):
+			by_name[String(event.get("event", ""))] = []
+		by_name[String(event.get("event", ""))].append(event)
+	_check(by_name.get("session_start", []).size() == 2, "expected 2 session_start events")
+	var ends: Array = by_name.get("session_end", [])
+	_check(ends.size() == 1 and String(ends[0].session_id) == first, "session_end is not in the first session")
+	if ends.size() == 1:
+		result["first_session_duration_s"] = int(ends[0].properties.duration_s)
+		_check(int(ends[0].properties.duration_s) >= 86400, "the first session is shorter than 24 hours: %d s" % int(ends[0].properties.duration_s))
+	_check(String(by_name.get("before_a_day", [{}])[0].get("session_id", "")) == first, "before_a_day is not in the first session")
+	_check(String(by_name.get("after_a_day", [{}])[0].get("session_id", "")) == second, "after_a_day is not in the second session")
+	# The reason of a refusal, as the collector sends it.
+	var body := '{"error":{"code":"INVALID_EVENT","message":"1 of 2 events break the session ID contract. No event of the batch was accepted","refused":[{"index":1,"message_id":"x","code":"SESSION_ID_REQUIRED","message":"m"}]}}'
+	var reason: String = sdk._refusal_reason(body.to_utf8_buffer())
+	result["refusal_reason"] = reason
+	_check(reason.contains("INVALID_EVENT") and reason.contains("SESSION_ID_REQUIRED"), "refusal reason: %s" % reason)
+	_check(sdk._refusal_reason("not json".to_utf8_buffer()) == "", "a body that is not JSON gave a reason")
 
 
 func _recovery(run_id: String, result: Dictionary) -> void:
