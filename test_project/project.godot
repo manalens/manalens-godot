@@ -1,6 +1,6 @@
 ; Headless test project for the Manalens Godot SDK.
-; Run: godot --headless --path sdks/godot/test_project -- --endpoint=http://127.0.0.1:3291 --publishable-key=ua_pk_...
-; addons/untitled_analytics is a symlink to ../../addons/untitled_analytics.
+; Run: godot --headless --path sdks/godot/test_project -- --endpoint=http://127.0.0.1:3291 --publishable-key=mana_pk_...
+; addons/manalens is a symlink to ../../addons/manalens.
 
 config_version=5
 
@@ -12,4 +12,4 @@ config/features=PackedStringArray("4.7")
 
 [autoload]
 
-UntitledAnalytics="*res://addons/untitled_analytics/untitled_analytics.gd"
+Manalens="*res://addons/manalens/manalens.gd"

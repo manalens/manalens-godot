@@ -1,9 +1,7 @@
 extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
-##   --publishable-key=KEY  a project publishable key (required; --write-key=KEY,
-##                          the old name, passes the key as the deprecated
-##                          write_key option)
+##   --publishable-key=KEY  a project publishable key (required)
 ##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, disabled, overflow, optout, corrupt or marker
 ##   --run-id=ID          tag for the events (default: random)
 ##
@@ -24,7 +22,7 @@ extends Node
 ##           queued event has a session ID that is not the anonymous ID; the
 ##           reason of a refusal is read from the response body. Needs no network.
 ##
-## Prints one line `UA_RESULT {json}` and exits 0 on success, 1 on failure.
+## Prints one line `MANALENS_RESULT {json}` and exits 0 on success, 1 on failure.
 
 const OFFLINE_ENDPOINT := "http://127.0.0.1:9"
 var _args := {}
@@ -35,7 +33,7 @@ func _ready() -> void:
 	for arg in OS.get_cmdline_user_args():
 		var parts := String(arg).trim_prefix("--").split("=", true, 1)
 		_args[parts[0]] = parts[1] if parts.size() > 1 else "true"
-	if not _args.has("endpoint") or not (_args.has("publishable-key") or _args.has("write-key")):
+	if not _args.has("endpoint") or not _args.has("publishable-key"):
 		_finish({"error": "pass -- --endpoint=URL --publishable-key=KEY"})
 		return
 	var run_id := String(_args.get("run-id", str(randi())))
@@ -63,18 +61,14 @@ func _options(endpoint: String, consent_required := false) -> Dictionary:
 		"app_version": "0.1.0-test", "build": "godot-test", "storefront": "itch",
 		"consent_required": consent_required, "flush_interval_s": 1.0,
 		"quit_timeout_s": 5.0, "debug": _args.has("debug"),
+		"publishable_key": _args["publishable-key"],
 	}
-	# --write-key exercises the deprecated write_key option.
-	if _args.has("publishable-key"):
-		options["publishable_key"] = _args["publishable-key"]
-	else:
-		options["write_key"] = _args["write-key"]
 	return options
 
 
 func _offline(run_id: String, result: Dictionary) -> void:
 	_fresh()
-	var sdk = UntitledAnalytics
+	var sdk = Manalens
 	sdk.init(_options(OFFLINE_ENDPOINT))
 	sdk.track("level_start", {"level": 1, "attempt": 1, "run_id": run_id})
 	sdk.track("level_complete", {"level": 1, "attempt": 1, "score": 1200, "run_id": run_id})
@@ -103,7 +97,7 @@ func _offline(run_id: String, result: Dictionary) -> void:
 
 func _consent(run_id: String, result: Dictionary) -> void:
 	_fresh()
-	var sdk = UntitledAnalytics
+	var sdk = Manalens
 	sdk.init(_options(String(_args["endpoint"]), true))
 	sdk.track("before_consent", {"run_id": run_id})
 	sdk.identify("consent-%s" % run_id, {})
@@ -121,7 +115,7 @@ func _consent(run_id: String, result: Dictionary) -> void:
 
 func _link(_run_id: String, result: Dictionary) -> void:
 	_fresh()
-	var sdk = UntitledAnalytics
+	var sdk = Manalens
 	sdk.init(_options(OFFLINE_ENDPOINT, true))
 	var url := "https://example.com/wiki"
 	_check(sdk.link_url(url) == url, "link_url added an ID before consent")
@@ -133,11 +127,11 @@ func _link(_run_id: String, result: Dictionary) -> void:
 	var after := int(Time.get_unix_time_from_system())
 	result["plain"] = plain
 	result["query"] = query
-	var prefix := url + "?ua_hid=" + id + "."
+	var prefix := url + "?mana_hid=" + id + "."
 	_check(plain.begins_with(prefix), "plain link: %s" % plain)
 	var at := int(plain.trim_prefix(prefix))
 	_check(at >= before and at <= after, "handoff time %d is not now" % at)
-	_check(query.begins_with("https://example.com/wiki?page=2&ua_hid=" + id + ".") and query.ends_with("#boss"), "query link: %s" % query)
+	_check(query.begins_with("https://example.com/wiki?page=2&mana_hid=" + id + ".") and query.ends_with("#boss"), "query link: %s" % query)
 	sdk.reset()
 	_check(not sdk.link_url(url).contains(id), "link_url kept the old ID after reset()")
 	await sdk.shutdown()
@@ -145,7 +139,7 @@ func _link(_run_id: String, result: Dictionary) -> void:
 
 func _session_age(_run_id: String, result: Dictionary) -> void:
 	_fresh()
-	var sdk = UntitledAnalytics
+	var sdk = Manalens
 	sdk.init(_options(OFFLINE_ENDPOINT))
 	var first: String = sdk.get_session_id()
 	# 23 hours old: the same session.
@@ -183,14 +177,14 @@ func _session_age(_run_id: String, result: Dictionary) -> void:
 
 func _recovery(run_id: String, result: Dictionary) -> void:
 	var cfg := ConfigFile.new()
-	cfg.load("user://untitled_analytics.cfg")
+	cfg.load("user://manalens.cfg")
 	var now := Time.get_unix_time_from_system()
 	var planted := "00000000-0000-4000-8000-%012d" % (randi() % 1000000000000)
 	cfg.set_value("session", "id", planted)
 	cfg.set_value("session", "started_at", now - 3.0 * 3600.0)
 	cfg.set_value("session", "last_activity_at", now - 2.0 * 3600.0)
-	cfg.save("user://untitled_analytics.cfg")
-	var sdk = UntitledAnalytics
+	cfg.save("user://manalens.cfg")
+	var sdk = Manalens
 	sdk.init(_options(String(_args["endpoint"])))
 	_check(sdk.get_session_id() != planted, "the stale session was not rotated")
 	sdk.track("after_recovery", {"run_id": run_id})
@@ -202,7 +196,7 @@ func _recovery(run_id: String, result: Dictionary) -> void:
 
 func _errors(run_id: String, result: Dictionary) -> void:
 	_fresh()
-	var sdk = UntitledAnalytics
+	var sdk = Manalens
 	sdk.init(_options(String(_args["endpoint"])))
 	sdk.set_before_send(func(props: Dictionary):
 		if String(props.message).contains("secret"):
@@ -235,7 +229,7 @@ func _engine_error() -> void:
 ## enabled = false: every call is a no-op. No ID, no queue, no files.
 func _disabled(run_id: String, result: Dictionary) -> void:
 	_fresh()
-	var sdk = UntitledAnalytics
+	var sdk = Manalens
 	var options := _options(String(_args["endpoint"]))
 	options["enabled"] = false
 	sdk.init(options)
@@ -249,14 +243,14 @@ func _disabled(run_id: String, result: Dictionary) -> void:
 	_check(sdk.get_anonymous_id() == "", "disabled: an anonymous ID was made")
 	_check(sdk.get_queue_size() == 0, "disabled: events were queued")
 	_check(sdk.link_url(url) == url, "disabled: link_url added an ID")
-	_check(not FileAccess.file_exists("user://untitled_analytics.cfg"), "disabled: the config file was written")
-	_check(not FileAccess.file_exists("user://untitled_analytics_queue.json"), "disabled: the queue file was written")
+	_check(not FileAccess.file_exists("user://manalens.cfg"), "disabled: the config file was written")
+	_check(not FileAccess.file_exists("user://manalens_queue.json"), "disabled: the queue file was written")
 
 
 ## send_failed(0, n) when the queue is over max_queue.
 func _overflow(run_id: String, result: Dictionary) -> void:
 	_fresh()
-	var sdk = UntitledAnalytics
+	var sdk = Manalens
 	var dropped := [0]
 	sdk.send_failed.connect(func(status: int, count: int): if status == 0: dropped[0] += count)
 	var options := _options(OFFLINE_ENDPOINT)
@@ -274,12 +268,12 @@ func _overflow(run_id: String, result: Dictionary) -> void:
 ## set_consent(false) writes the opt-out marker and clears the ID.
 func _optout(run_id: String, result: Dictionary) -> void:
 	_fresh()
-	var sdk = UntitledAnalytics
+	var sdk = Manalens
 	sdk.init(_options(OFFLINE_ENDPOINT))
 	_check(sdk.get_anonymous_id() != "", "optout: no ID before opt-out")
 	sdk.set_consent(false)
 	sdk.track("after_optout", {"run_id": run_id})
-	_check(FileAccess.file_exists("user://untitled_analytics_optout"), "optout: the marker was not written")
+	_check(FileAccess.file_exists("user://manalens_optout"), "optout: the marker was not written")
 	_check(sdk.get_anonymous_id() == "", "optout: the ID was kept")
 	_check(sdk.get_queue_size() == 0, "optout: events were queued")
 	_fresh()
@@ -289,16 +283,16 @@ func _optout(run_id: String, result: Dictionary) -> void:
 func _corrupt(run_id: String, result: Dictionary) -> void:
 	_fresh()
 	var garbage := "[consent\ngranted = fal"
-	var file := FileAccess.open("user://untitled_analytics.cfg", FileAccess.WRITE)
+	var file := FileAccess.open("user://manalens.cfg", FileAccess.WRITE)
 	file.store_string(garbage)
 	file.close()
-	var sdk = UntitledAnalytics
+	var sdk = Manalens
 	sdk.init(_options(OFFLINE_ENDPOINT))
 	sdk.track("after_corrupt", {"run_id": run_id})
 	_check(sdk.get_anonymous_id() == "", "corrupt: an ID was made")
 	_check(sdk.get_queue_size() == 0, "corrupt: events were queued")
-	_check(FileAccess.get_file_as_string("user://untitled_analytics.cfg") == garbage, "corrupt: the config file was overwritten")
-	_check(FileAccess.file_exists("user://untitled_analytics.cfg.unreadable"), "corrupt: no copy was kept")
+	_check(FileAccess.get_file_as_string("user://manalens.cfg") == garbage, "corrupt: the config file was overwritten")
+	_check(FileAccess.file_exists("user://manalens.cfg.unreadable"), "corrupt: no copy was kept")
 	sdk.set_consent(true)
 	_check(sdk.get_anonymous_id() != "", "corrupt: set_consent(true) did not start tracking")
 	_fresh()
@@ -307,10 +301,10 @@ func _corrupt(run_id: String, result: Dictionary) -> void:
 ## The opt-out marker wins when the config file is missing.
 func _marker(run_id: String, result: Dictionary) -> void:
 	_fresh()
-	var file := FileAccess.open("user://untitled_analytics_optout", FileAccess.WRITE)
+	var file := FileAccess.open("user://manalens_optout", FileAccess.WRITE)
 	file.store_string("opted out\n")
 	file.close()
-	var sdk = UntitledAnalytics
+	var sdk = Manalens
 	sdk.init(_options(OFFLINE_ENDPOINT))
 	sdk.track("after_marker", {"run_id": run_id})
 	_check(sdk.get_anonymous_id() == "", "marker: an ID was made")
@@ -319,19 +313,19 @@ func _marker(run_id: String, result: Dictionary) -> void:
 
 
 func _fresh() -> void:
-	for path in ["user://untitled_analytics.cfg", "user://untitled_analytics_queue.json", "user://untitled_analytics_optout", "user://untitled_analytics.cfg.unreadable", "user://untitled_analytics.cfg.tmp"]:
+	for path in ["user://manalens.cfg", "user://manalens_queue.json", "user://manalens_optout", "user://manalens.cfg.unreadable", "user://manalens.cfg.tmp"]:
 		if FileAccess.file_exists(path):
 			DirAccess.remove_absolute(path)
 
 
 func _queue_on_disk() -> int:
-	var parsed = JSON.parse_string(FileAccess.get_file_as_string("user://untitled_analytics_queue.json"))
+	var parsed = JSON.parse_string(FileAccess.get_file_as_string("user://manalens_queue.json"))
 	return parsed.size() if typeof(parsed) == TYPE_ARRAY else -1
 
 
 func _stored_anonymous_id() -> bool:
 	var cfg := ConfigFile.new()
-	return cfg.load("user://untitled_analytics.cfg") == OK and String(cfg.get_value("identity", "anonymous_id", "")) != ""
+	return cfg.load("user://manalens.cfg") == OK and String(cfg.get_value("identity", "anonymous_id", "")) != ""
 
 
 func _wait_for(condition: Callable, seconds: float) -> bool:
@@ -351,5 +345,5 @@ func _check(ok: bool, message: String) -> void:
 func _finish(result: Dictionary) -> void:
 	result["failures"] = _failures
 	result["ok"] = _failures.is_empty() and not result.has("error")
-	print("UA_RESULT " + JSON.stringify(result))
+	print("MANALENS_RESULT " + JSON.stringify(result))
 	get_tree().quit(0 if result.ok else 1)

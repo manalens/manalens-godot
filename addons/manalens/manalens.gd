@@ -1,21 +1,21 @@
 extends Node
-## Manalens for Godot 4 (autoload singleton `UntitledAnalytics`).
+## Manalens for Godot 4 (autoload singleton `Manalens`).
 ##
 ## Sends game events to `POST /v0/events` with the project publishable key,
 ## the same envelope as the Manalens web SDK, and `context.app` in
 ## place of `context.page`.
 ##
-##   UntitledAnalytics.init({
-##       "publishable_key": "ua_pk_...",
+##   Manalens.init({
+##       "publishable_key": "mana_pk_...",
 ##       "endpoint": "https://collector.example.com",
 ##       "app_version": "1.4.0", "build": "571", "storefront": "steam",
 ##   })
-##   UntitledAnalytics.track("level_complete", {"level": 3, "score": 1200})
+##   Manalens.track("level_complete", {"level": 3, "score": 1200})
 ##
-## Identity: a persistent anonymous UUID in `user://untitled_analytics.cfg`.
+## Identity: a persistent anonymous UUID in `user://manalens.cfg`.
 ## Sessions rotate after 30 minutes without focus or events. `game_open`,
 ## `session_start` and `session_end` are automatic. Events are batched, kept in
-## an offline file queue (`user://untitled_analytics_queue.json`, at most 1000
+## an offline file queue (`user://manalens_queue.json`, at most 1000
 ## events and 7 days), and retried with backoff.
 ##
 ## Errors: `track_error()` sends an `error` event. On Godot 4.5+ the SDK also
@@ -31,13 +31,13 @@ signal flushed(sent: int, ok: bool)
 ## responses do not emit it: those events stay queued and are sent later.
 signal send_failed(status: int, dropped: int)
 
-const LIBRARY_NAME := "Untitled Analytics Godot SDK"
+const LIBRARY_NAME := "Manalens Godot SDK"
 const LIBRARY_VERSION := "0.1.0"
-const CONFIG_PATH := "user://untitled_analytics.cfg"
-const QUEUE_PATH := "user://untitled_analytics_queue.json"
+const CONFIG_PATH := "user://manalens.cfg"
+const QUEUE_PATH := "user://manalens_queue.json"
 ## Written by set_consent(false). While it exists the SDK records nothing,
 ## whatever the config file says (fail closed if that file is lost or damaged).
-const OPTOUT_PATH := "user://untitled_analytics_optout"
+const OPTOUT_PATH := "user://manalens_optout"
 const SESSION_TIMEOUT_S := 30.0 * 60.0
 ## A session is never older than this. A game that stays open gets a
 ## session_end and a session_start every 24 hours.
@@ -47,7 +47,7 @@ const MAX_EVENT_AGE_S := 7.0 * 24.0 * 3600.0 - 3600.0
 const MAX_BACKOFF_S := 300.0
 const STOREFRONTS := ["steam", "itch", "epic", "gog", "app_store", "play", "other"]
 const SEVERITIES := ["debug", "info", "warning", "error", "critical"]
-const ERROR_LOGGER_PATH := "res://addons/untitled_analytics/error_logger.gd"
+const ERROR_LOGGER_PATH := "res://addons/manalens/error_logger.gd"
 ## Error limits (as Sentry Godot): the same fingerprint at most once a second,
 ## at most 20 errors in 10 seconds, at most 5 automatic errors in one frame.
 const ERROR_DEDUPE_MS := 1000
@@ -58,15 +58,14 @@ const BREADCRUMBS := 20
 ## The collector keeps string properties up to 1024 characters.
 const MAX_STRING := 1024
 ## Identity handoff (P-2523): the URL parameter that the web SDK reads.
-const HANDOFF_PARAM := "ua_hid"
+const HANDOFF_PARAM := "mana_hid"
 
 var _options := {
 	## false: the SDK sends nothing, writes no files and keeps no ID. Use
 	## `"enabled": not OS.has_feature("editor")` to keep editor runs out of
 	## your reports.
 	"enabled": true,
-	## The project publishable key (`ua_pk_...`). `write_key` is its old name
-	## and still works (deprecated).
+	## The project publishable key (`mana_pk_...`).
 	"publishable_key": "",
 	"endpoint": "",
 	"app_version": "",
@@ -97,7 +96,6 @@ var _disabled := false
 var _state_unreadable := false
 ## set_consent(false) could not write the opt-out marker: stay off, retry.
 var _optout_pending := false
-var _warned_write_key := false
 var _identity_active := false
 var _cfg := ConfigFile.new()
 var _queue: Array = []  # [{ "at": unix seconds, "event": envelope }]
@@ -133,51 +131,37 @@ var _quoted_re := RegEx.create_from_string("\"[^\"]*\"|'[^']*'")
 ## Start the SDK. Keys: publishable_key, endpoint (required); enabled, app_version, build,
 ## storefront, consent_required, flush_interval_s, flush_at, max_queue,
 ## handle_quit, quit_timeout_s, capture_engine_errors, capture_warnings,
-## max_auto_errors_per_session, debug. `write_key` is the old name of
-## `publishable_key` and still works (deprecated, with one warning).
+## max_auto_errors_per_session, debug.
 func init(options: Dictionary) -> void:
 	if _initialized:
-		push_warning("UntitledAnalytics: init() was already called")
+		push_warning("Manalens: init() was already called")
 		return
 	for key in options:
-		if key == "write_key":
-			continue
 		if _options.has(key):
 			_options[key] = options[key]
 		else:
-			push_warning("UntitledAnalytics: unknown option %s" % key)
-	if options.has("write_key"):
-		if not _warned_write_key:
-			_warned_write_key = true
-			push_warning("UntitledAnalytics: the write_key option is deprecated; use publishable_key")
-		var legacy := String(options["write_key"])
-		var current := String(_options.publishable_key)
-		if current != "" and legacy != "" and current != legacy:
-			push_error("UntitledAnalytics: give one key: publishable_key (write_key is its old name). The two values differ")
-			return
-		if current == "":
-			_options.publishable_key = legacy
+			push_warning("Manalens: unknown option %s" % key)
 	if not bool(_options.enabled):
 		# Turned off (for example in the editor): every call is a silent no-op.
 		_disabled = true
 		_initialized = true
 		if _options.debug:
-			print("UntitledAnalytics: disabled (enabled = false); no events are sent")
+			print("Manalens: disabled (enabled = false); no events are sent")
 		return
 	if String(_options.publishable_key) == "" or String(_options.endpoint) == "":
-		push_error("UntitledAnalytics: publishable_key and endpoint are required")
+		push_error("Manalens: publishable_key and endpoint are required")
 		return
-	# A secret key (ua_sk_) or an API key (ua_api_, ua_mcp_) must never ship in a game build.
+	# Only the publishable key may ship in a game build: never a secret key (mana_sk_) or an API key (mana_api_).
 	var key := String(_options.publishable_key)
-	if key.begins_with("ua_sk_") or key.begins_with("ua_api_") or key.begins_with("ua_mcp_"):
-		push_error("UntitledAnalytics: publishable_key must be the publishable key (ua_pk_...). Never put a secret key or an API key in a game build")
+	if not key.begins_with("mana_pk_"):
+		push_error("Manalens: publishable_key must be the publishable key (mana_pk_...). Never put a secret key or an API key in a game build")
 		return
 	_options.flush_at = clampi(int(_options.flush_at), 1, 50)
 	_options.max_queue = maxi(int(_options.max_queue), int(_options.flush_at))
 	_check_label("app_version", 32)
 	_check_label("build", 64)
 	if String(_options.storefront) != "" and not STOREFRONTS.has(String(_options.storefront)):
-		push_warning("UntitledAnalytics: storefront must be one of %s; ignored" % [STOREFRONTS])
+		push_warning("Manalens: storefront must be one of %s; ignored" % [STOREFRONTS])
 		_options.storefront = ""
 	_initialized = true
 	if FileAccess.file_exists(CONFIG_PATH):
@@ -187,7 +171,7 @@ func init(options: Dictionary) -> void:
 			_state_unreadable = true
 			_cfg = ConfigFile.new()
 			DirAccess.copy_absolute(CONFIG_PATH, CONFIG_PATH + ".unreadable")
-			push_warning("UntitledAnalytics: could not read %s (error %d); no events until set_consent(true)" % [CONFIG_PATH, load_error])
+			push_warning("Manalens: could not read %s (error %d); no events until set_consent(true)" % [CONFIG_PATH, load_error])
 	# A missing file is a first run.
 	_http = HTTPRequest.new()
 	_http.timeout = 10.0
@@ -211,7 +195,7 @@ func track(event: String, properties: Dictionary = {}) -> void:
 	if not _ready_to_record():
 		return
 	if event.length() < 1 or event.length() > 128:
-		push_warning("UntitledAnalytics: event name must be 1 to 128 characters")
+		push_warning("Manalens: event name must be 1 to 128 characters")
 		return
 	_touch()
 	_enqueue(_build("track", event, _scalars(properties)))
@@ -242,10 +226,10 @@ func identify(user_id: String, traits: Dictionary = {}) -> void:
 	if _disabled:
 		return
 	if not _initialized:
-		push_warning("UntitledAnalytics: call init() first")
+		push_warning("Manalens: call init() first")
 		return
 	if user_id.length() < 1 or user_id.length() > 255:
-		push_warning("UntitledAnalytics: user_id must be 1 to 255 characters")
+		push_warning("Manalens: user_id must be 1 to 255 characters")
 		return
 	if not _identity_allowed():
 		_deferred_identify = [user_id, traits]
@@ -283,7 +267,7 @@ func set_consent(granted: bool) -> void:
 		return
 	if granted:
 		if FileAccess.file_exists(OPTOUT_PATH) and DirAccess.remove_absolute(OPTOUT_PATH) != OK:
-			push_warning("UntitledAnalytics: could not remove the opt-out marker; tracking stays off")
+			push_warning("Manalens: could not remove the opt-out marker; tracking stays off")
 			return
 		_optout_pending = false
 		# An unreadable config is replaced by a new one after an explicit opt-in.
@@ -335,7 +319,7 @@ func flush() -> void:
 
 
 ## End the session and try to send everything, for at most quit_timeout_s.
-## Call `await UntitledAnalytics.shutdown()` before your own quit when
+## Call `await Manalens.shutdown()` before your own quit when
 ## handle_quit is false. Unsent events stay on disk for the next launch.
 func shutdown() -> void:
 	if not _identity_active:
@@ -369,9 +353,9 @@ func get_anonymous_id() -> String:
 ## Add this install's handoff parameter to a website URL before the game opens
 ## it, so the website joins the browser to this player without identify():
 ##
-##   OS.shell_open(UntitledAnalytics.link_url("https://example.com/wiki"))
+##   OS.shell_open(Manalens.link_url("https://example.com/wiki"))
 ##
-## The parameter is `ua_hid=<anonymous ID>.<unix seconds>`. The website's
+## The parameter is `mana_hid=<anonymous ID>.<unix seconds>`. The website's
 ## Manalens SDK removes it from the address bar, and the collector
 ## accepts it for 10 minutes. Before consent (or before init) the URL is
 ## returned unchanged.
@@ -494,7 +478,7 @@ func _identity_allowed() -> bool:
 
 func _ready_to_record() -> bool:
 	if not _initialized:
-		push_warning("UntitledAnalytics: call init() first")
+		push_warning("Manalens: call init() first")
 		return false
 	return _identity_active  # No events at all before consent.
 
@@ -573,7 +557,7 @@ func _touch() -> void:
 		_start_session(now)
 	elif now - _session_started_at >= SESSION_MAX_AGE_S:
 		if _options.debug:
-			print("UntitledAnalytics: the session is 24 hours old; a new session starts")
+			print("Manalens: the session is 24 hours old; a new session starts")
 		_end_session(now)
 		_start_session(now)
 	_last_activity_at = now
@@ -601,7 +585,7 @@ func _save_cfg() -> void:
 	if error == OK:
 		error = DirAccess.rename_absolute(tmp, CONFIG_PATH)
 	if error != OK and _options.debug:
-		push_warning("UntitledAnalytics: could not save %s (%s)" % [CONFIG_PATH, error])
+		push_warning("Manalens: could not save %s (%s)" % [CONFIG_PATH, error])
 
 
 ## Write the opt-out marker (temp file, then rename). On failure stay off and retry.
@@ -615,7 +599,7 @@ func _write_optout() -> void:
 		ok = DirAccess.rename_absolute(tmp, OPTOUT_PATH) == OK
 	_optout_pending = not ok
 	if not ok:
-		push_warning("UntitledAnalytics: could not write the opt-out marker; tracking stays off and the write is retried")
+		push_warning("Manalens: could not write the opt-out marker; tracking stays off and the write is retried")
 
 
 # Events and queue ------------------------------------------------------------
@@ -674,7 +658,7 @@ func _enqueue(entry: Dictionary) -> void:
 		send_failed.emit(0, overflow)
 	_queue_dirty = true
 	if _options.debug:
-		print("UntitledAnalytics: queued %s %s" % [entry.event.type, entry.event.get("event", "")])
+		print("Manalens: queued %s %s" % [entry.event.type, entry.event.get("event", "")])
 	if _queue.size() >= int(_options.flush_at):
 		_save_queue()
 		flush()
@@ -729,14 +713,14 @@ func _on_request_completed(result: int, code: int, _headers: PackedStringArray, 
 		if rejected:
 			# Dropped, not sent again: the same batch would be refused again.
 			var reason := _refusal_reason(_body)
-			push_warning("UntitledAnalytics: collector refused %d events (HTTP %d)%s; they are dropped" % [count, code, "" if reason == "" else " " + reason])
+			push_warning("Manalens: collector refused %d events (HTTP %d)%s; they are dropped" % [count, code, "" if reason == "" else " " + reason])
 			send_failed.emit(code, count)
 	else:
 		_failures += 1
 		var delay := minf(MAX_BACKOFF_S, pow(2.0, float(_failures)))
 		_backoff_until = _now() + delay * randf_range(0.5, 1.0)
 		if _options.debug:
-			print("UntitledAnalytics: send failed (result %d, HTTP %d); retry in %.0f s" % [result, code, delay])
+			print("Manalens: send failed (result %d, HTTP %d); retry in %.0f s" % [result, code, delay])
 	_in_flight.clear()
 	_sending = false
 	_save_queue()
@@ -773,7 +757,7 @@ func _save_queue() -> void:
 func _install_error_logger() -> void:
 	if not ClassDB.class_exists("Logger") or not OS.has_method("add_logger"):
 		if _options.debug:
-			print("UntitledAnalytics: engine error capture needs Godot 4.5 or later")
+			print("Manalens: engine error capture needs Godot 4.5 or later")
 		return
 	var script = load(ERROR_LOGGER_PATH)
 	if script == null:
@@ -825,7 +809,7 @@ func _record_error(message: String, options: Dictionary, source: String) -> void
 		if changed == null:
 			return
 		if typeof(changed) != TYPE_DICTIONARY:
-			push_warning("UntitledAnalytics: before_send must return a Dictionary or null; error dropped")
+			push_warning("Manalens: before_send must return a Dictionary or null; error dropped")
 			return
 		props = _scalars(changed)
 	if source != "manual":
@@ -895,14 +879,14 @@ func _scalars(values: Dictionary) -> Dictionary:
 			TYPE_STRING, TYPE_STRING_NAME:
 				out[name] = String(value).left(1024)
 			_:
-				push_warning("UntitledAnalytics: property %s is not a scalar; dropped" % name)
+				push_warning("Manalens: property %s is not a scalar; dropped" % name)
 	return out
 
 
 func _check_label(key: String, max_length: int) -> void:
 	var value := String(_options[key])
 	if value != "" and (value.length() > max_length or _label_re.search(value) == null):
-		push_warning("UntitledAnalytics: %s must be 1 to %d letters, digits, spaces or . _ + -; ignored" % [key, max_length])
+		push_warning("Manalens: %s must be 1 to %d letters, digits, spaces or . _ + -; ignored" % [key, max_length])
 		_options[key] = ""
 
 

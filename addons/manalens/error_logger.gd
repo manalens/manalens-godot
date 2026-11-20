@@ -22,7 +22,7 @@ func _log_error(function: String, file: String, line: int, code: String, rationa
 	if kind == "shader" or (kind == "warning" and not capture_warnings):
 		return
 	var message := rationale if rationale != "" else code
-	if message.begins_with("UntitledAnalytics:"):
+	if message.begins_with("Manalens:"):
 		return  # The SDK's own warnings: never send them (no loop).
 	var item := {"kind": kind, "message": message, "file": file, "line": line, "function": function, "stack": ""}
 	# The first script frame is the place in the game code; the C++ place is
