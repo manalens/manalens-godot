@@ -1,13 +1,13 @@
-# Untitled Analytics for Godot 4
+# ManaLens for Godot 4
 
 Game analytics for Godot 4 in plain GDScript (no native code). It works on every export target that has `HTTPRequest`: Windows, macOS, Linux, Android, iOS and Web.
 
-It sends events to the Untitled Analytics collector (`POST /v0/events`) with your project's **Publishable key** (the `publishable_key` option, sent in the `x-publishable-key` header). The Publishable key is safe to ship in a game build. Never put a Secret key or an API key in a build. Events go in the same envelope as the web SDK, with `context.app` in place of `context.page`. See the docs page `docs/sdks/godot.mdx` and `docs/sdks/app-events.mdx` in the Untitled Analytics repository.
+It sends events to the ManaLens collector (`POST /v0/events`) with your project's **Publishable key** (the `publishable_key` option, sent in the `x-publishable-key` header). The Publishable key is safe to ship in a game build. Never put a Secret key or an API key in a build. Events go in the same envelope as the web SDK, with `context.app` in place of `context.page`. See the docs page `docs/sdks/godot.mdx` and `docs/sdks/app-events.mdx` in the ManaLens repository.
 
 ## Install
 
 1. Copy `addons/untitled_analytics` into your project's `addons/` folder.
-2. Open **Project > Project Settings > Plugins** and enable **Untitled Analytics**. This adds the `UntitledAnalytics` autoload.
+2. Open **Project > Project Settings > Plugins** and enable **ManaLens**. This adds the `UntitledAnalytics` autoload.
 
 ## Use
 
