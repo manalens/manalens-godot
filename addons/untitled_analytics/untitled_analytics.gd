@@ -1,8 +1,8 @@
 extends Node
-## ManaLens for Godot 4 (autoload singleton `UntitledAnalytics`).
+## Manalens for Godot 4 (autoload singleton `UntitledAnalytics`).
 ##
 ## Sends game events to `POST /v0/events` with the project publishable key,
-## the same envelope as the ManaLens web SDK, and `context.app` in
+## the same envelope as the Manalens web SDK, and `context.app` in
 ## place of `context.page`.
 ##
 ##   UntitledAnalytics.init({
@@ -372,7 +372,7 @@ func get_anonymous_id() -> String:
 ##   OS.shell_open(UntitledAnalytics.link_url("https://example.com/wiki"))
 ##
 ## The parameter is `ua_hid=<anonymous ID>.<unix seconds>`. The website's
-## ManaLens SDK removes it from the address bar, and the collector
+## Manalens SDK removes it from the address bar, and the collector
 ## accepts it for 10 minutes. Before consent (or before init) the URL is
 ## returned unchanged.
 func link_url(url: String) -> String:
