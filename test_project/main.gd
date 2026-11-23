@@ -20,7 +20,8 @@ extends Node
 ##
 ## session_age: a session that is 24 hours old ends and a new one starts; every
 ##           queued event has a session ID that is not the anonymous ID; the
-##           reason of a refusal is read from the response body. Needs no network.
+##           reason of a refusal is read from the response body; properties are
+##           trimmed to 50 keys and 8 KB (P-2700). Needs no network.
 ##
 ## Prints one line `MANALENS_RESULT {json}` and exits 0 on success, 1 on failure.
 
@@ -173,6 +174,20 @@ func _session_age(_run_id: String, result: Dictionary) -> void:
 	result["refusal_reason"] = reason
 	_check(reason.contains("INVALID_EVENT") and reason.contains("SESSION_ID_REQUIRED"), "refusal reason: %s" % reason)
 	_check(sdk._refusal_reason("not json".to_utf8_buffer()) == "", "a body that is not JSON gave a reason")
+	# P-2700: properties are trimmed to 50 keys and 8 KB of JSON.
+	var many := {}
+	for i in 60:
+		many["k%d" % i] = i
+	var fitted: Dictionary = sdk._fit(many, "properties")
+	result["fit_keys"] = fitted.size()
+	_check(fitted.size() == 50 and fitted.has("k49") and not fitted.has("k50"), "expected the first 50 keys, got %d" % fitted.size())
+	var big := {}
+	for i in 10:
+		big["k%d" % i] = "€".repeat(1024)
+	fitted = sdk._fit(big, "properties")
+	result["fit_big_keys"] = fitted.size()
+	_check(fitted.size() == 2 and JSON.stringify(fitted).to_utf8_buffer().size() <= 8192, "expected 2 keys of 3 KB, got %d" % fitted.size())
+	_check(sdk._fit({"a": 1}, "properties").size() == 1, "a small object changed")
 
 
 func _recovery(run_id: String, result: Dictionary) -> void:

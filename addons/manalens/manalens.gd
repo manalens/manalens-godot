@@ -57,6 +57,10 @@ const AUTO_ERRORS_PER_FRAME := 5
 const BREADCRUMBS := 20
 ## The collector keeps string properties up to 1024 characters.
 const MAX_STRING := 1024
+## The collector refuses properties or traits with more keys, or with more
+## UTF-8 bytes of JSON (P-2700). The SDK drops the extra keys with a warning.
+const MAX_PROPERTY_KEYS := 50
+const MAX_PROPERTY_BYTES := 8 * 1024
 ## Identity handoff (P-2523): the URL parameter that the web SDK reads.
 const HANDOFF_PARAM := "mana_hid"
 
@@ -239,7 +243,7 @@ func identify(user_id: String, traits: Dictionary = {}) -> void:
 	_save_cfg()
 	_touch()
 	var event := _build("identify", "", {})
-	event["traits"] = _scalars(traits)
+	event["traits"] = _fit(_scalars(traits), "traits")
 	_enqueue(event)
 	flush()
 
@@ -613,7 +617,7 @@ func _build(type: String, event: String, properties: Dictionary, at: float = -1.
 		"version": LIBRARY_VERSION,
 		"original_timestamp": _iso(when),
 		"context": _context(),
-		"properties": properties,
+		"properties": _fit(properties, "properties"),
 		"anonymous_id": _anonymous_id,
 		"session_id": _session_id,
 	}
@@ -779,14 +783,14 @@ func _record_error(message: String, options: Dictionary, source: String) -> void
 	var error_type := String(options.get("error_type", "")).left(128)
 	var file := String(options.get("file", "")).left(256)
 	var function := String(options.get("function", "")).left(256)
-	var props := _scalars(options.get("properties", {}) if typeof(options.get("properties")) == TYPE_DICTIONARY else {})
-	props.merge({
+	# The error's own keys come first, so a trim to the limits (_fit) drops custom keys first.
+	var props := {
 		"severity": severity,
 		"message": message.left(MAX_STRING),
 		"handled": bool(options.get("handled", true)),
 		"source": source,
 		"fingerprint": String(options.get("fingerprint", "")).left(128),
-	}, true)
+	}
 	if props.fingerprint == "":
 		props.fingerprint = _fingerprint(error_type, message, file, function)
 	if error_type != "":
@@ -801,6 +805,7 @@ func _record_error(message: String, options: Dictionary, source: String) -> void
 		props["stack"] = stack.left(MAX_STRING)
 	if not _breadcrumbs.is_empty():
 		props["breadcrumbs"] = ",".join(_breadcrumbs).right(MAX_STRING)
+	props.merge(_scalars(options.get("properties", {}) if typeof(options.get("properties")) == TYPE_DICTIONARY else {}), false)
 	if not _error_allowed(String(props.fingerprint), source):
 		_errors_dropped += 1
 		return
@@ -860,6 +865,26 @@ func _platform() -> String:
 		"iOS": return "ios"
 		"Web": return "web"
 	return "other"
+
+
+## Keep keys in order while there are at most MAX_PROPERTY_KEYS keys and
+## MAX_PROPERTY_BYTES of JSON. The collector refuses a whole batch for one
+## event over a limit, so the SDK drops the extra keys with a warning.
+func _fit(values: Dictionary, field: String) -> Dictionary:
+	if values.size() <= MAX_PROPERTY_KEYS and JSON.stringify(values).to_utf8_buffer().size() <= MAX_PROPERTY_BYTES:
+		return values
+	var out := {}
+	var used := 2
+	for key in values:
+		if out.size() >= MAX_PROPERTY_KEYS:
+			break
+		var entry := JSON.stringify({key: values[key]}).to_utf8_buffer().size() - 2 + (1 if out.size() > 0 else 0)
+		if used + entry > MAX_PROPERTY_BYTES:
+			break
+		out[key] = values[key]
+		used += entry
+	push_warning("Manalens: %s over the limit of %d keys or %d bytes; %d keys dropped" % [field, MAX_PROPERTY_KEYS, MAX_PROPERTY_BYTES, values.size() - out.size()])
+	return out
 
 
 ## Keep scalar values; the collector refuses nested objects and arrays.
