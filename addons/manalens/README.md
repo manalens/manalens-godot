@@ -2,7 +2,7 @@
 
 Game analytics for Godot 4 in plain GDScript (no native code). It works on every export target that has `HTTPRequest`: Windows, macOS, Linux, Android, iOS and Web.
 
-It sends events to the Manalens collector (`POST /v0/events`) with your project's **Publishable key** (the `publishable_key` option, sent in the `x-publishable-key` header). The Publishable key is safe to ship in a game build. Never put a Secret key or an API key in a build. Events go in the same envelope as the web SDK, with `context.app` in place of `context.page`. See the docs page `docs/sdks/godot.mdx` and `docs/sdks/app-events.mdx` in the Manalens repository.
+It sends events to the Manalens collector (`POST /v0/events`) with your project's **Publishable key** (the `publishable_key` option, sent in the `x-publishable-key` header). The Publishable key is safe to ship in a game build. Never put a Secret key or an API key in a build. Events go in the same envelope as the web SDK, with `context.app` in place of `context.page`. See the [Godot docs](https://docs.manalens.dev/sdks/godot) and the [app events reference](https://docs.manalens.dev/sdks/app-events).
 
 ## Install
 
