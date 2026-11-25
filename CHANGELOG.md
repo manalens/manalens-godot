@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: `identify()` did not send the traits. The traits were kept next to the event in the queue, not in the event. Found by the shared request fixtures (`sdks/SPEC.md`).
+
 ## 0.1.0
 
 First release.

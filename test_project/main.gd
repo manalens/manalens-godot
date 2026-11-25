@@ -2,7 +2,7 @@ extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
 ##   --publishable-key=KEY  a project publishable key (required)
-##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, disabled, overflow, optout, corrupt or marker
+##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, disabled, overflow, optout, corrupt, marker or fixtures
 ##   --run-id=ID          tag for the events (default: random)
 ##
 ## offline:  fresh state; queue events against a dead endpoint, check they are
@@ -22,6 +22,11 @@ extends Node
 ##           queued event has a session ID that is not the anonymous ID; the
 ##           reason of a refusal is read from the response body; properties are
 ##           trimmed to 50 keys and 8 KB (P-2700). Needs no network.
+##
+## fixtures: the shared fixture scenario of sdks/SPEC.md (the steps of the Unity
+##           FixtureTests) with a fixed clock and sequential IDs. The endpoint
+##           is the capture server of scripts/test-godot-sdk-fixtures.mjs
+##           (pnpm test:godot), which writes or checks the request bodies.
 ##
 ## Prints one line `MANALENS_RESULT {json}` and exits 0 on success, 1 on failure.
 
@@ -52,6 +57,7 @@ func _ready() -> void:
 		"optout": await _optout(run_id, result)
 		"corrupt": await _corrupt(run_id, result)
 		"marker": await _marker(run_id, result)
+		"fixtures": await _fixtures(run_id, result)
 		_: _failures.append("unknown mode %s" % mode)
 	_finish(result)
 
@@ -325,6 +331,63 @@ func _marker(run_id: String, result: Dictionary) -> void:
 	_check(sdk.get_anonymous_id() == "", "marker: an ID was made")
 	_check(sdk.get_queue_size() == 0, "marker: events were queued")
 	_fresh()
+
+
+## The fixture scenario. Launch 1 plays, identifies, hits an error, then
+## crashes (no quit). Launch 2 sends app_unclean_exit and session_end of the
+## crashed session, then quits cleanly.
+func _fixtures(_run_id: String, result: Dictionary) -> void:
+	_fresh()
+	var fixture_sdk = load("res://fixture_sdk.gd")
+	var endpoint := String(_args["endpoint"])
+	var first = fixture_sdk.new()
+	add_child(first)
+	first.init(_fixture_options(endpoint, {"flush_at": 50, "app_version": "1.4.0", "build": "571", "storefront": "steam"}))
+	first.track("level_start", {"level": 3, "mode": "story"})
+	first.track("resource", {
+		"flow": "source", "currency": "gold", "amount": 25, "ratio": 0.75, "float": 0.1,
+		"big": 9000000000, "price": 4.99, "boss": false, "note": null, "text": "quote \" slash \\ line\nend",
+	})
+	first.identify("player_42", {"plan": "supporter", "level": 12, "vip": true})
+	first.track_error("Save failed for slot 3", {"severity": "critical", "error_type": "SaveFailed", "handled": false, "properties": {"slot": 3}})
+	first.clock += 5.0
+	push_error("Player.jump: the player node is null")
+	await get_tree().process_frame
+	await get_tree().process_frame
+	_check(first._error_logger != null, "fixtures: no engine logger on Godot %s" % Engine.get_version_info().string)
+	first.clock += 10.0
+	first._on_tick()  # Saves the session; then the process dies.
+	first.hold = false
+	first.flush()
+	_check(await _wait_for(func(): return not first.is_sending() and first.get_queue_size() == 0, 10.0), "fixtures: launch 1 did not send its queue")
+	# The crash: no quit, no exit flag, nothing more on disk.
+	first._timer.stop()
+	first.set_process(false)
+	if first._error_logger != null:
+		OS.remove_logger(first._error_logger)
+		first._error_logger = null
+	first._initialized = false
+	var second = fixture_sdk.new()
+	second.clock = first.clock + 120.0
+	second.next_id = first.next_id
+	add_child(second)
+	second.init(_fixture_options(endpoint, {"app_version": "1.4.1-beta.2+572", "build": "572", "storefront": "itch"}))
+	second.track("level_complete", {"level": 3, "score": 1200})
+	second.clock += 42.0
+	second.hold = false
+	await second.shutdown()
+	_check(second.get_queue_size() == 0, "fixtures: launch 2 did not send its queue")
+	result["anonymous_id"] = second.get_anonymous_id()
+	_fresh()
+
+
+func _fixture_options(endpoint: String, values: Dictionary) -> Dictionary:
+	var options := {
+		"endpoint": endpoint, "publishable_key": String(_args["publishable-key"]),
+		"flush_interval_s": 10.0, "handle_quit": false, "quit_timeout_s": 5.0, "debug": _args.has("debug"),
+	}
+	options.merge(values, true)
+	return options
 
 
 func _fresh() -> void:

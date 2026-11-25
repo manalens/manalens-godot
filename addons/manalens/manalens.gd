@@ -243,7 +243,7 @@ func identify(user_id: String, traits: Dictionary = {}) -> void:
 	_save_cfg()
 	_touch()
 	var event := _build("identify", "", {})
-	event["traits"] = _fit(_scalars(traits), "traits")
+	event.event["traits"] = _fit(_scalars(traits), "traits")
 	_enqueue(event)
 	flush()
 
