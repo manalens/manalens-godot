@@ -506,8 +506,9 @@ func _start_identity() -> void:
 		_last_activity_at = float(_cfg.get_value("session", "last_activity_at", _session_started_at))
 		# No normal exit and the game had focus: count it as a crash (as the
 		# Sentry "abnormal" session). A game the OS closed in the background
-		# is not a crash.
-		if not bool(_cfg.get_value("session", "exited", false)) and bool(_cfg.get_value("session", "focused", true)):
+		# is not a crash. On web a closed or reloaded tab has no quit event,
+		# so every relaunch would look like a crash: no crash detection there.
+		if not bool(_cfg.get_value("session", "exited", false)) and bool(_cfg.get_value("session", "focused", true)) and _platform() != "web":
 			var crash := {"previous_session_id": previous}
 			for key in ["build", "app_version"]:
 				var value := String(_cfg.get_value("session", key, ""))

@@ -52,7 +52,7 @@ Options: `enabled` (true; editor runs send events like a live game, and dev and 
 - **Quit:** with `handle_quit` (default), the SDK handles the window close request: it sends `session_end`, flushes for at most `quit_timeout_s`, then quits. If your game handles the close request itself (for example with a confirmation dialog), set `handle_quit` to false and call `await Manalens.shutdown()` before `get_tree().quit()`.
 - **Consent:** with `consent_required: true`, no event is recorded and no ID is written until `set_consent(true)`. The choice is saved, so it applies on the next launch too. `identify()` before consent is sent after consent.
 - **Errors:** on Godot 4.5+, `error_logger.gd` (an `OS.add_logger()` logger) collects engine and script errors under a Mutex, and the SDK sends them on the main thread. Limits: the same fingerprint once a second, 20 errors in 10 seconds, 5 engine errors in one frame and 50 in one session. Dropped errors are counted in `session_end` (`errors_dropped`).
-- **Crashes:** when the last run did not exit normally while the game had focus, the next launch sends `app_unclean_exit` in the old session, with `previous_session_id`, `previous_build` and `previous_app_version`.
+- **Crashes:** when the last run did not exit normally while the game had focus, the next launch sends `app_unclean_exit` in the old session, with `previous_session_id`, `previous_build` and `previous_app_version`. Not on web: a closed or reloaded tab has no quit event.
 - **Context:** `context.app.platform` comes from `OS.get_name()`, `engine` is `godot`, and `app_version`, `build` and `storefront` come from `init()`.
 
 ## Web export

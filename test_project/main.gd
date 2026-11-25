@@ -2,7 +2,7 @@ extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
 ##   --publishable-key=KEY  a project publishable key (required)
-##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, disabled, overflow, optout, corrupt, marker or fixtures
+##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, disabled, overflow, optout, corrupt, marker or fixtures
 ##   --run-id=ID          tag for the events (default: random)
 ##
 ## offline:  fresh state; queue events against a dead endpoint, check they are
@@ -22,6 +22,10 @@ extends Node
 ##           queued event has a session ID that is not the anonymous ID; the
 ##           reason of a refusal is read from the response body; properties are
 ##           trimmed to 50 keys and 8 KB (P-2700). Needs no network.
+##
+## web_reload: a launch that ends without a quit (a reloaded or closed tab), then
+##           a second launch. On web: no app_unclean_exit; on windows (the
+##           control): one. The old session ends in both. Needs no network.
 ##
 ## fixtures: the shared fixture scenario of sdks/SPEC.md (the steps of the Unity
 ##           FixtureTests) with a fixed clock and sequential IDs. The endpoint
@@ -52,6 +56,7 @@ func _ready() -> void:
 		"errors": await _errors(run_id, result)
 		"link": await _link(run_id, result)
 		"session_age": await _session_age(run_id, result)
+		"web_reload": await _web_reload(run_id, result)
 		"disabled": await _disabled(run_id, result)
 		"overflow": await _overflow(run_id, result)
 		"optout": await _optout(run_id, result)
@@ -201,6 +206,53 @@ func _session_age(_run_id: String, result: Dictionary) -> void:
 	result["fit_big_keys"] = fitted.size()
 	_check(fitted.size() == 2 and JSON.stringify(fitted).to_utf8_buffer().size() <= 8192, "expected 2 keys of 3 KB, got %d" % fitted.size())
 	_check(sdk._fit({"a": 1}, "properties").size() == 1, "a small object changed")
+
+
+func _web_reload(_run_id: String, result: Dictionary) -> void:
+	for script_path in ["res://web_sdk.gd", "res://fixture_sdk.gd"]:
+		_fresh()
+		var sdk_script = load(script_path)
+		var first = sdk_script.new()
+		add_child(first)
+		first.init(_fixture_options(OFFLINE_ENDPOINT, {}))
+		var session: String = first.get_session_id()
+		first.clock += 25.0
+		first._on_tick()  # Saves the session; then the tab is reloaded: no quit.
+		first._timer.stop()
+		first.set_process(false)
+		if first._error_logger != null:
+			OS.remove_logger(first._error_logger)
+			first._error_logger = null
+		first._initialized = false
+		var second = sdk_script.new()
+		second.clock = first.clock + 600.0
+		second.next_id = first.next_id
+		add_child(second)
+		second.init(_fixture_options(OFFLINE_ENDPOINT, {}))
+		var platform: String = second._platform()
+		var unclean := 0
+		var ended := 0
+		for entry in second._queue:
+			var event: Dictionary = entry.event
+			if String(event.get("event", "")) == "app_unclean_exit":
+				unclean += 1
+			if String(event.get("event", "")) == "session_end" and String(event.session_id) == session:
+				ended += 1
+		result["%s_unclean_exit" % platform] = unclean
+		_check(ended == 1, "%s: the old session did not end" % platform)
+		if platform == "web":
+			_check(unclean == 0, "web: a reload sent app_unclean_exit")
+		else:
+			_check(unclean == 1, "%s: no app_unclean_exit after a launch without a quit" % platform)
+		first.queue_free()
+		second._timer.stop()
+		second.set_process(false)
+		if second._error_logger != null:
+			OS.remove_logger(second._error_logger)
+			second._error_logger = null
+		second._initialized = false
+		second.queue_free()
+	_fresh()
 
 
 func _recovery(run_id: String, result: Dictionary) -> void:
