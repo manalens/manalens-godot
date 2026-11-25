@@ -17,7 +17,6 @@ func _ready() -> void:
         "endpoint": "https://YOUR_COLLECTOR_ENDPOINT",
         "app_version": "1.4.0",
         "storefront": "steam",
-        "enabled": not OS.has_feature("editor"),
     })
 ```
 
