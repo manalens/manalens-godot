@@ -700,6 +700,24 @@ func _refusal_reason(body: PackedByteArray) -> String:
 	return reason
 
 
+## The refused events of an accepted batch (P-2787): the collector stores the
+## valid events and lists the others in "errors". Returns the "rejected" count
+## and the reason codes, or a count of 0 when the body has none.
+func _refused_in_accepted(body: PackedByteArray) -> Dictionary:
+	var json := JSON.new()
+	if json.parse(body.get_string_from_utf8()) != OK:
+		return {"count": 0, "reason": ""}
+	var parsed = json.data
+	if typeof(parsed) != TYPE_DICTIONARY or not (typeof(parsed.get("rejected")) in [TYPE_INT, TYPE_FLOAT]) or int(parsed.rejected) <= 0:
+		return {"count": 0, "reason": ""}
+	var codes := {}
+	if typeof(parsed.get("errors")) == TYPE_ARRAY:
+		for item in parsed.errors:
+			if typeof(item) == TYPE_DICTIONARY:
+				codes[String(item.get("code", ""))] = true
+	return {"count": int(parsed.rejected), "reason": ", ".join(PackedStringArray(codes.keys()))}
+
+
 func _on_request_completed(result: int, code: int, _headers: PackedStringArray, _body: PackedByteArray) -> void:
 	var count := _in_flight.size()
 	var ok := result == HTTPRequest.RESULT_SUCCESS and code >= 200 and code < 300
@@ -719,6 +737,15 @@ func _on_request_completed(result: int, code: int, _headers: PackedStringArray, 
 			var reason := _refusal_reason(_body)
 			push_warning("Manalens: collector refused %d events (HTTP %d)%s; they are dropped" % [count, code, "" if reason == "" else " " + reason])
 			send_failed.emit(code, count)
+		else:
+			# An accepted batch can still list refused events (P-2787). They are
+			# not sent again: the same events would be refused again.
+			var refused := _refused_in_accepted(_body)
+			var dropped := mini(count, int(refused.count))
+			if dropped > 0:
+				push_warning("Manalens: collector refused %d of %d events (HTTP %d)%s; they are dropped" % [dropped, count, code, "" if refused.reason == "" else " " + refused.reason])
+				send_failed.emit(code, dropped)
+				count -= dropped
 	else:
 		_failures += 1
 		var delay := minf(MAX_BACKOFF_S, pow(2.0, float(_failures)))

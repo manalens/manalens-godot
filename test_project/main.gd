@@ -180,6 +180,13 @@ func _session_age(_run_id: String, result: Dictionary) -> void:
 	result["refusal_reason"] = reason
 	_check(reason.contains("INVALID_EVENT") and reason.contains("SESSION_ID_REQUIRED"), "refusal reason: %s" % reason)
 	_check(sdk._refusal_reason("not json".to_utf8_buffer()) == "", "a body that is not JSON gave a reason")
+	# P-2787: refused events of an accepted batch.
+	var partial := '{"accepted":1,"rejected":2,"errors":[{"index":1,"message_id":null,"code":"INVALID_EVENT","message":"m"},{"index":2,"message_id":null,"code":"SESSION_ID_REQUIRED","message":"m"}]}'
+	var refused: Dictionary = sdk._refused_in_accepted(partial.to_utf8_buffer())
+	result["refused_in_accepted"] = refused
+	_check(int(refused.count) == 2 and String(refused.reason).contains("INVALID_EVENT") and String(refused.reason).contains("SESSION_ID_REQUIRED"), "refused in accepted: %s" % [refused])
+	_check(int(sdk._refused_in_accepted('{"accepted":1}'.to_utf8_buffer()).count) == 0, "an older collector body gave refused events")
+	_check(int(sdk._refused_in_accepted("not json".to_utf8_buffer()).count) == 0, "a body that is not JSON gave refused events")
 	# P-2700: properties are trimmed to 50 keys and 8 KB of JSON.
 	var many := {}
 	for i in 60:
