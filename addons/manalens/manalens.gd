@@ -101,6 +101,11 @@ var _state_unreadable := false
 ## set_consent(false) could not write the opt-out marker: stay off, retry.
 var _optout_pending := false
 var _identity_active := false
+## Web export with localStorage: the state, the queue and the opt-out marker are
+## there, written at once (P-2791). user:// on web is IndexedDB, which Godot
+## writes a moment after a file is closed, so a reload in that moment lost the
+## state and the next load made a new anonymous ID.
+var _web_storage := false
 var _cfg := ConfigFile.new()
 var _queue: Array = []  # [{ "at": unix seconds, "event": envelope }]
 var _queue_dirty := false
@@ -168,7 +173,18 @@ func init(options: Dictionary) -> void:
 		push_warning("Manalens: storefront must be one of %s; ignored" % [STOREFRONTS])
 		_options.storefront = ""
 	_initialized = true
-	if FileAccess.file_exists(CONFIG_PATH):
+	_web_storage = OS.has_feature("web") and _web_storage_available()
+	if _web_storage:
+		var text = _store_read(CONFIG_PATH)
+		if text != null:
+			var parse_error := ERR_FILE_CANT_READ if text is bool else _cfg.parse(String(text))
+			if parse_error != OK:
+				_state_unreadable = true
+				_cfg = ConfigFile.new()
+				if text is String:
+					_store_write(CONFIG_PATH + ".unreadable", text)
+				push_warning("Manalens: could not read the saved state (error %d); no events until set_consent(true)" % parse_error)
+	elif FileAccess.file_exists(CONFIG_PATH):
 		var load_error := _cfg.load(CONFIG_PATH)
 		if load_error != OK:
 			# Fail closed: keep a copy, record nothing, and never overwrite the file.
@@ -270,7 +286,7 @@ func set_consent(granted: bool) -> void:
 	if _disabled:
 		return
 	if granted:
-		if FileAccess.file_exists(OPTOUT_PATH) and DirAccess.remove_absolute(OPTOUT_PATH) != OK:
+		if _store_exists(OPTOUT_PATH) and not _store_remove(OPTOUT_PATH):
 			push_warning("Manalens: could not remove the opt-out marker; tracking stays off")
 			return
 		_optout_pending = false
@@ -298,8 +314,8 @@ func set_consent(granted: bool) -> void:
 		_cfg.erase_section("session")
 	_save_cfg()
 	_queue.clear()
-	if FileAccess.file_exists(QUEUE_PATH):
-		DirAccess.remove_absolute(QUEUE_PATH)
+	if _store_exists(QUEUE_PATH):
+		_store_remove(QUEUE_PATH)
 
 
 ## Send queued events now (one batch; the rest follows when it succeeds).
@@ -473,7 +489,7 @@ func _on_tick() -> void:
 # Identity and sessions -------------------------------------------------------
 
 func _identity_allowed() -> bool:
-	if _state_unreadable or _optout_pending or FileAccess.file_exists(OPTOUT_PATH):
+	if _state_unreadable or _optout_pending or _store_exists(OPTOUT_PATH):
 		return false
 	if _cfg.has_section_key("consent", "granted"):
 		return bool(_cfg.get_value("consent", "granted"))
@@ -584,6 +600,10 @@ func _save_session() -> void:
 func _save_cfg() -> void:
 	if _state_unreadable:
 		return  # Never overwrite a config that could not be read.
+	if _web_storage:
+		if not _store_write(CONFIG_PATH, _cfg.encode_to_text()) and _options.debug:
+			push_warning("Manalens: could not save the state in localStorage")
+		return
 	# Write a temp file, then rename, so a crash never leaves a cut-off config.
 	var tmp := CONFIG_PATH + ".tmp"
 	var error := _cfg.save(tmp)
@@ -595,6 +615,11 @@ func _save_cfg() -> void:
 
 ## Write the opt-out marker (temp file, then rename). On failure stay off and retry.
 func _write_optout() -> void:
+	if _web_storage:
+		_optout_pending = not _store_write(OPTOUT_PATH, "opted out\n")
+		if _optout_pending:
+			push_warning("Manalens: could not write the opt-out marker; tracking stays off and the write is retried")
+		return
 	var tmp := OPTOUT_PATH + ".tmp"
 	var file := FileAccess.open(tmp, FileAccess.WRITE)
 	var ok := file != null
@@ -605,6 +630,64 @@ func _write_optout() -> void:
 	_optout_pending = not ok
 	if not ok:
 		push_warning("Manalens: could not write the opt-out marker; tracking stays off and the write is retried")
+
+
+# Storage ---------------------------------------------------------------------
+# One place for the files of the SDK. On web with localStorage (_web_storage):
+# the browser's localStorage, written at once. Keys start with the user data
+# folder, which has the project name: games on one origin (for example
+# html-classic.itch.zone) share one localStorage. A file from SDK 0.1.0 moves
+# to localStorage on its first read. Elsewhere: the files in user://.
+
+func _web_storage_available() -> bool:
+	return str(JavaScriptBridge.eval("(function(){try{var k='__manalens_probe__';localStorage.setItem(k,'1');localStorage.removeItem(k);return '1'}catch(e){return '0'}})()", true)) == "1"
+
+
+func _web_key(path: String) -> String:
+	return "manalens:%s:%s" % [OS.get_user_data_dir(), path.trim_prefix("user://")]
+
+
+## The text, null when it is missing, or false when it could not be read.
+func _store_read(path: String) -> Variant:
+	if not _web_storage:
+		if not FileAccess.file_exists(path):
+			return null
+		var file := FileAccess.open(path, FileAccess.READ)
+		if file == null:
+			return false
+		return file.get_as_text()
+	var result := str(JavaScriptBridge.eval("(function(){try{var v=localStorage.getItem(%s);return v===null?'0':'1'+v}catch(e){return '2'}})()" % JSON.stringify(_web_key(path)), true))
+	if result.begins_with("1"):
+		return result.substr(1)
+	if result != "0":
+		return false
+	# Missing in localStorage: move the file of SDK 0.1.0 once.
+	if not FileAccess.file_exists(path):
+		return null
+	var old := FileAccess.get_file_as_string(path)
+	if _store_write(path, old):
+		DirAccess.remove_absolute(path)
+	return old
+
+
+func _store_write(path: String, text: String) -> bool:
+	return str(JavaScriptBridge.eval("(function(){try{localStorage.setItem(%s,%s);return '1'}catch(e){return '0'}})()" % [JSON.stringify(_web_key(path)), JSON.stringify(text)], true)) == "1"
+
+
+func _store_exists(path: String) -> bool:
+	if not _web_storage:
+		return FileAccess.file_exists(path)
+	return _store_read(path) != null
+
+
+## Also removes the file: a later read must not bring an old value back.
+func _store_remove(path: String) -> bool:
+	var removed := true
+	if _web_storage:
+		removed = str(JavaScriptBridge.eval("(function(){try{localStorage.removeItem(%s);return '1'}catch(e){return '0'}})()" % JSON.stringify(_web_key(path)), true)) == "1"
+	if FileAccess.file_exists(path):
+		removed = DirAccess.remove_absolute(path) == OK and removed
+	return removed
 
 
 # Events and queue ------------------------------------------------------------
@@ -762,9 +845,10 @@ func _on_request_completed(result: int, code: int, _headers: PackedStringArray, 
 
 
 func _load_queue() -> void:
-	if not FileAccess.file_exists(QUEUE_PATH):
+	var text = _store_read(QUEUE_PATH)
+	if not text is String:
 		return
-	var parsed = JSON.parse_string(FileAccess.get_file_as_string(QUEUE_PATH))
+	var parsed = JSON.parse_string(text)
 	if typeof(parsed) != TYPE_ARRAY:
 		return
 	for entry in parsed:
@@ -775,6 +859,10 @@ func _load_queue() -> void:
 
 func _save_queue() -> void:
 	if not _queue_dirty or not _identity_active:
+		return
+	if _web_storage:
+		if _store_write(QUEUE_PATH, JSON.stringify(_queue)):
+			_queue_dirty = false
 		return
 	var file := FileAccess.open(QUEUE_PATH, FileAccess.WRITE)
 	if file == null:

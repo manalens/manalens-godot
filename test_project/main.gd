@@ -3,6 +3,7 @@ extends Node
 ##   --endpoint=URL       the collector (required)
 ##   --publishable-key=KEY  a project publishable key (required)
 ##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, disabled, overflow, optout, corrupt, marker or fixtures
+##   In a web export, the same arguments come from the page URL (?mode=web_id&endpoint=...&publishable-key=...).
 ##   --run-id=ID          tag for the events (default: random)
 ##
 ## offline:  fresh state; queue events against a dead endpoint, check they are
@@ -27,6 +28,13 @@ extends Node
 ##           a second launch. On web: no app_unclean_exit; on windows (the
 ##           control): one. The old session ends in both. Needs no network.
 ##
+## web_id, web_optout, web_after_optout, web_legacy: web export only
+##           (scripts/test-godot-web.mjs, P-2791). web_id starts the SDK and
+##           prints the anonymous ID at once; the script reloads the page then.
+##           web_optout opts out; web_after_optout (the next load) checks that
+##           the opt-out is kept. web_legacy: a state file of SDK 0.1.0 moves to
+##           localStorage and keeps its anonymous ID.
+##
 ## fixtures: the shared fixture scenario of sdks/SPEC.md (the steps of the Unity
 ##           FixtureTests) with a fixed clock and sequential IDs. The endpoint
 ##           is the capture server of scripts/test-godot-sdk-fixtures.mjs
@@ -43,6 +51,12 @@ func _ready() -> void:
 	for arg in OS.get_cmdline_user_args():
 		var parts := String(arg).trim_prefix("--").split("=", true, 1)
 		_args[parts[0]] = parts[1] if parts.size() > 1 else "true"
+	if OS.has_feature("web"):
+		var search := str(JavaScriptBridge.eval("location.search", true)).trim_prefix("?")
+		for part in search.split("&", false):
+			var pair := part.split("=", true, 1)
+			if pair.size() == 2:
+				_args[pair[0].uri_decode()] = pair[1].uri_decode()
 	if not _args.has("endpoint") or not _args.has("publishable-key"):
 		_finish({"error": "pass -- --endpoint=URL --publishable-key=KEY"})
 		return
@@ -57,6 +71,10 @@ func _ready() -> void:
 		"link": await _link(run_id, result)
 		"session_age": await _session_age(run_id, result)
 		"web_reload": await _web_reload(run_id, result)
+		"web_id": _web_id(result)
+		"web_optout": _web_optout(result)
+		"web_after_optout": _web_after_optout(result)
+		"web_legacy": _web_legacy(result)
 		"disabled": await _disabled(run_id, result)
 		"overflow": await _overflow(run_id, result)
 		"optout": await _optout(run_id, result)
@@ -253,6 +271,47 @@ func _web_reload(_run_id: String, result: Dictionary) -> void:
 		second._initialized = false
 		second.queue_free()
 	_fresh()
+
+
+func _web_id(result: Dictionary) -> void:
+	var sdk = Manalens
+	sdk.init(_options(String(_args["endpoint"])))
+	result["anonymous_id"] = sdk.get_anonymous_id()
+	result["web_storage"] = sdk._web_storage
+	_check(sdk.get_anonymous_id() != "", "web_id: no anonymous ID")
+
+
+func _web_optout(result: Dictionary) -> void:
+	var sdk = Manalens
+	sdk.init(_options(String(_args["endpoint"])))
+	_check(sdk.get_anonymous_id() != "", "web_optout: no anonymous ID before the opt-out")
+	sdk.set_consent(false)
+	_check(sdk.get_anonymous_id() == "", "web_optout: the ID is kept after set_consent(false)")
+	result["web_storage"] = sdk._web_storage
+
+
+func _web_after_optout(result: Dictionary) -> void:
+	var sdk = Manalens
+	sdk.init(_options(String(_args["endpoint"])))
+	sdk.track("after_optout", {})
+	result["anonymous_id"] = sdk.get_anonymous_id()
+	_check(sdk.get_anonymous_id() == "", "web_after_optout: a new anonymous ID after the opt-out")
+	_check(sdk.get_queue_size() == 0, "web_after_optout: events queued after the opt-out")
+
+
+func _web_legacy(result: Dictionary) -> void:
+	# SDK 0.1.0 kept the state in user://manalens.cfg (IndexedDB on web).
+	var legacy_id := "00000000-0000-4000-8000-000000000791"
+	var cfg := ConfigFile.new()
+	cfg.set_value("identity", "anonymous_id", legacy_id)
+	cfg.set_value("identity", "first_open_at", "2026-11-01T00:00:00.000Z")
+	cfg.save("user://manalens.cfg")
+	var sdk = Manalens
+	sdk.init(_options(String(_args["endpoint"])))
+	result["anonymous_id"] = sdk.get_anonymous_id()
+	_check(sdk._web_storage, "web_legacy: localStorage is not used")
+	_check(sdk.get_anonymous_id() == legacy_id, "web_legacy: the anonymous ID of the file is not kept")
+	_check(not FileAccess.file_exists("user://manalens.cfg"), "web_legacy: the file is not removed after the move")
 
 
 func _recovery(run_id: String, result: Dictionary) -> void:
@@ -483,4 +542,6 @@ func _finish(result: Dictionary) -> void:
 	result["failures"] = _failures
 	result["ok"] = _failures.is_empty() and not result.has("error")
 	print("MANALENS_RESULT " + JSON.stringify(result))
+	if OS.has_feature("web"):
+		return  # A page stays open; the script reloads or closes it.
 	get_tree().quit(0 if result.ok else 1)

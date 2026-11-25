@@ -45,7 +45,7 @@ Options: `enabled` (true; editor runs send events like a live game, and dev and 
 
 ## How it works
 
-- **Identity:** a random UUID in `user://manalens.cfg`, kept across launches. `identify()` stores the player ID in the same file.
+- **Identity:** a random UUID in `user://manalens.cfg` (in a web export: the browser's `localStorage`), kept across launches. `identify()` stores the player ID in the same file.
 - **Sessions:** a session continues while the game has focus. After 30 minutes without focus or events, the next activity ends the old session (`session_end` with `duration_s`) and starts a new one. A session left open by a crash is ended at its last activity on the next launch.
 - **Queue:** events are batched and sent every 10 seconds, at 20 queued events, on focus loss or pause, and on quit. The queue is saved in `user://manalens_queue.json`, so events survive a crash or an offline session. At most 1000 events are kept, and events older than 7 days are dropped (the collector refuses them). Each event has a `message_id`, so a retry never counts twice.
 - **Retry:** a network error or a 5xx, 408 or 429 response keeps the batch and waits about 2, 4, 8 ... seconds with jitter (at most 5 minutes). Other 4xx responses drop the batch, because a retry fails again.
