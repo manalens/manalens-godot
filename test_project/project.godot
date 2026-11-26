@@ -13,3 +13,9 @@ config/features=PackedStringArray("4.7")
 [autoload]
 
 Manalens="*res://addons/manalens/manalens.gd"
+
+[manalens]
+
+; The test runs use --headless, which the SDK treats as a server build. Keep
+; the client behaviour (game_open and sessions) so the fixtures do not change.
+general/track_server_builds=true

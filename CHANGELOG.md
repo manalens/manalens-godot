@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Dedicated server builds (G-2533): a build with the `dedicated_server` feature tag, or a run with the `headless` display server (`--headless`), sends no `game_open`, `session_start`, `session_end`, or `app_unclean_exit`, and does not count as an install. The SDK prints one line that says why. `track()` and `identify()` still work. The new option `track_server_builds` (default `false`, also in **Project Settings > Manalens** under Advanced Settings) sends the automatic events from a server build. New `Manalens.is_server_build()`. Behavior change: a `--headless` run that used to send `game_open` and sessions now sends them only with `track_server_builds`. See the new docs page "Multiplayer and dedicated servers".
+
 ## 0.1.4 (2026-11-26)
 
 - Each request sends `sent_at`, the device clock at the time of the send. The collector uses it to correct the event times, so a device clock that is fast or slow no longer gives wrong times or refused events (P-2799).

@@ -36,6 +36,7 @@ const OFFLINE_MODES = [
   ['web_reload', 'a launch that ends without a quit, then a second launch'],
   ['disabled', 'enabled = false: no ID, no queue, no files'],
   ['overflow', 'send_failed(0, n) when the queue is over max_queue'],
+  ['server', 'a server build sends no game_open or sessions unless track_server_builds'],
 ];
 
 function run(mode, endpoint) {

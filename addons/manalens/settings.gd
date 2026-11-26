@@ -17,6 +17,7 @@ const ITEMS := [
 	["app_version", TYPE_STRING, "", PROPERTY_HINT_NONE, "", false],
 	["build", TYPE_STRING, "", PROPERTY_HINT_NONE, "", false],
 	["storefront", TYPE_STRING, "", PROPERTY_HINT_ENUM_SUGGESTION, STOREFRONTS, false],
+	["track_server_builds", TYPE_BOOL, false, PROPERTY_HINT_NONE, "", false],
 ]
 
 

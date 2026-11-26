@@ -2,7 +2,7 @@ extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
 ##   --publishable-key=KEY  a project publishable key (required)
-##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, editor_setup, disabled, overflow, optout, corrupt, marker, fixtures, privacy or before_send
+##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, editor_setup, disabled, overflow, optout, corrupt, marker, fixtures, privacy, before_send or server
 ##   In a web export, the same arguments come from the page URL (?mode=web_id&endpoint=...&publishable-key=...).
 ##   --run-id=ID          tag for the events (default: random)
 ##
@@ -706,7 +706,66 @@ func _more_modes(mode: String, result: Dictionary) -> void:
 	match mode:
 		"privacy": await _privacy(result)
 		"before_send": _before_send_mode(result)
+		"server": _server_mode(result)
 		_: _failures.append("unknown mode %s" % mode)
+
+
+## server: a dedicated server build (G-2533). `--headless` makes the display
+## server "headless", so this run is a server build. Without
+## track_server_builds: no game_open, session_start, session_end or
+## app_unclean_exit, and no install; track() and identify() still work. With
+## the option (as in this project's Project Settings): the client events come
+## back. Needs no network. pnpm test:godot runs it after the fixtures.
+func _server_mode(result: Dictionary) -> void:
+	const AUTOMATIC := ["game_open", "session_start", "session_end", "app_unclean_exit"]
+	result["display_server"] = DisplayServer.get_name()
+	_check(Manalens.is_server_build(), "server: a --headless run is not a server build (display server %s)" % DisplayServer.get_name())
+	# Off (the default): the init() option wins over the Project Setting.
+	_fresh()
+	var sdk = load("res://fixture_sdk.gd").new()
+	add_child(sdk)
+	sdk.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50, "track_server_builds": false}))
+	_check(sdk._server_quiet, "server: the SDK did not see the server build")
+	sdk.track("match_end", {"winner": "red"})
+	sdk.identify("server-player")
+	# A crash: the next launch finds an open session and the queue on disk.
+	sdk._save_session()
+	sdk._save_queue()
+	_stop(sdk)
+	sdk.queue_free()
+	var again = load("res://fixture_sdk.gd").new()
+	add_child(again)
+	again.clock += 60.0
+	again.next_id = 100
+	again.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50, "track_server_builds": false}))
+	again.track("match_end", {"winner": "blue"})
+	var quiet := _queued_names(again)
+	result["quiet"] = quiet
+	for name in AUTOMATIC:
+		_check(not quiet.has(name), "server: %s was queued without track_server_builds: %s" % [name, quiet])
+	_check(quiet.count("match_end") == 2 and quiet.has("identify"), "server: track() or identify() did not queue: %s" % [quiet])
+	_check(again.get_anonymous_id() != "" and again._session_id != "", "server: no anonymous or session ID for track()")
+	_stop(again)
+	again.queue_free()
+	# On: a server build sends the client events.
+	_fresh()
+	var loud = load("res://fixture_sdk.gd").new()
+	add_child(loud)
+	loud.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50, "track_server_builds": true}))
+	_check(not loud._server_quiet, "server: track_server_builds did not turn the client events on")
+	var names := _queued_names(loud)
+	result["tracked"] = names
+	_check(names.has("game_open") and names.has("session_start"), "server: no game_open or session_start with track_server_builds: %s" % [names])
+	_stop(loud)
+	loud.queue_free()
+	_fresh()
+
+
+func _queued_names(sdk) -> Array:
+	var names := []
+	for item in sdk._queue:
+		names.append(String(item.event.get("event", item.event.get("type", ""))))
+	return names
 
 
 ## privacy: set_consent(false) and reset() clear the breadcrumbs and the error

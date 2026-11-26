@@ -95,9 +95,18 @@ var _options := {
 	"capture_warnings": false,
 	## Automatic errors in one session; track_error() calls do not count.
 	"max_auto_errors_per_session": 50,
+	## A dedicated server build (the `dedicated_server` feature tag, or the
+	## headless display server) is not a player. false (default): on a server
+	## build the SDK sends no game_open, session_start, session_end or
+	## app_unclean_exit, so the server does not count as an install or a
+	## session. track() and identify() still work. true: a server build sends
+	## them as a client does.
+	"track_server_builds": false,
 	"debug": false,
 }
 var _initialized := false
+## true on a server build without track_server_builds: no automatic client events.
+var _server_quiet := false
 ## true when init() ran with enabled = false: every call is a no-op.
 var _disabled := false
 ## The config file exists but could not be read: it may hold an opt-out, so
@@ -146,7 +155,7 @@ var _quoted_re := RegEx.create_from_string("\"[^\"]*\"|'[^']*'")
 ## Start the SDK. Keys: publishable_key, endpoint (required); enabled, app_version, build,
 ## storefront, consent_required, flush_interval_s, flush_at, max_queue,
 ## handle_quit, quit_timeout_s, capture_engine_errors, capture_warnings,
-## max_auto_errors_per_session, debug. The values of Project Settings >
+## max_auto_errors_per_session, track_server_builds, debug. The values of Project Settings >
 ## Manalens apply first; the options override them. With a key in Project
 ## Settings and auto_init on, the autoload calls init({}) itself at the end of
 ## the first frame, unless your code called init() before.
@@ -185,6 +194,9 @@ func init(options: Dictionary = {}) -> void:
 		push_warning("Manalens: storefront must be one of %s; ignored" % [STOREFRONTS])
 		_options.storefront = ""
 	_initialized = true
+	_server_quiet = is_server_build() and not bool(_options.track_server_builds)
+	if _server_quiet:
+		print("Manalens: server build (dedicated_server or headless); no game_open, session or unclean exit events. Set track_server_builds to send them")
 	_web_storage = OS.has_feature("web") and _web_storage_available()
 	if _web_storage:
 		var text = _store_read(CONFIG_PATH)
@@ -220,6 +232,12 @@ func init(options: Dictionary = {}) -> void:
 		_install_error_logger()
 	if _identity_allowed():
 		_start_identity()
+
+
+## true in a dedicated server build: the `dedicated_server` feature tag, or the
+## headless display server (`--headless`).
+static func is_server_build() -> bool:
+	return OS.has_feature("dedicated_server") or DisplayServer.get_name() == "headless"
 
 
 ## Record a named event with scalar properties (String, int, float, bool, null).
@@ -577,7 +595,7 @@ func _start_identity() -> void:
 		# Sentry "abnormal" session). A game the OS closed in the background
 		# is not a crash. On web a closed or reloaded tab has no quit event,
 		# so every relaunch would look like a crash: no crash detection there.
-		if not bool(_cfg.get_value("session", "exited", false)) and bool(_cfg.get_value("session", "focused", true)) and _platform() != "web":
+		if not _server_quiet and not bool(_cfg.get_value("session", "exited", false)) and bool(_cfg.get_value("session", "focused", true)) and _platform() != "web":
 			var crash := {"previous_session_id": previous}
 			for key in ["build", "app_version"]:
 				var value := String(_cfg.get_value("session", key, ""))
@@ -586,7 +604,8 @@ func _start_identity() -> void:
 			_enqueue(_build("track", "app_unclean_exit", crash, _last_activity_at))
 		_end_session(_last_activity_at)
 	_start_session(now)
-	_enqueue(_build("track", "game_open", {"is_first_open": first_open, "first_open_at": String(_cfg.get_value("identity", "first_open_at", _iso(now)))}))
+	if not _server_quiet:
+		_enqueue(_build("track", "game_open", {"is_first_open": first_open, "first_open_at": String(_cfg.get_value("identity", "first_open_at", _iso(now)))}))
 	_save_cfg()
 	# Write game_open (the install signal) and app_unclean_exit to disk before
 	# any send: a process killed before the next save would lose them.
@@ -604,7 +623,8 @@ func _start_session(at: float) -> void:
 	_last_activity_at = at
 	_auto_errors = 0
 	_save_session()
-	_enqueue(_build("track", "session_start", {}, at))
+	if not _server_quiet:
+		_enqueue(_build("track", "session_start", {}, at))
 
 
 func _end_session(at: float) -> void:
@@ -615,7 +635,8 @@ func _end_session(at: float) -> void:
 	if _errors_dropped > 0:
 		ended["errors_dropped"] = _errors_dropped
 		_errors_dropped = 0
-	_enqueue(_build("track", "session_end", ended, at))
+	if not _server_quiet:
+		_enqueue(_build("track", "session_end", ended, at))
 	_session_id = ""
 	if _cfg.has_section("session"):
 		_cfg.erase_section("session")
