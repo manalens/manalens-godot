@@ -57,7 +57,12 @@ Options: `enabled` (true; editor runs send events like a live game, and dev and 
 
 ## Web export
 
-A web export runs in a browser, so its requests carry an `Origin` header. The collector accepts it only when the page is on your project domain or a subdomain (for example `play.example.com` for `example.com`). A build hosted on another site (for example itch.io's `html.itch.zone`) is refused with 403. Host the web build on your domain.
+A web export runs in a browser, so its requests carry an `Origin` header. The collector accepts it when the page is on:
+
+- your project domain or a subdomain (for example `play.example.com` for `example.com`);
+- a host in **Project settings > Allowed origins**.
+
+itch.io serves HTML5 builds from `html.itch.zone` and `html-classic.itch.zone`. A new project lists `*.itch.zone`, so an itch.io build works with no change. If you removed it, add `*.itch.zone` again (or click **Restore default**). For another portal, add its host (for example `*.crazygames.com`). A page on any other host gets 403. See [Allowed origins](https://docs.manalens.dev/sdks/app-events#allowed-origins).
 
 ## Test
 
