@@ -1,5 +1,5 @@
-// Godot SDK tests that need no network and no Manalens services (sdks/SPEC.md, G-2525).
-// The public repo's CI runs this file; in the monorepo it is `pnpm test:godot`.
+// Godot SDK tests that need no network and no Manalens services (G-2525).
+// CI runs this file. The Manalens monorepo runs it as `pnpm test:godot` on its pinned commit.
 //
 // 1. Mode `fixtures`: the shared fixture scenario against a capture server on
 //    127.0.0.1. The request bodies must equal test_project/fixtures/request-*.json.
@@ -14,7 +14,7 @@
 // Needs Godot 4.5 or later (the engine error capture) and Node 20 or later.
 // The monorepo also runs tests/godot-sdk.test.mjs (the fixtures against the
 // collector schema and the Unity fixtures) and `pnpm test:godot:local` (a real
-// collector and Tinybird). Those need the monorepo.
+// collector and Tinybird) on its pinned commit (CONTRIBUTING.md).
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';

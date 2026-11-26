@@ -87,8 +87,4 @@ itch.io serves HTML5 builds from `html.itch.zone` and `html-classic.itch.zone`. 
 
 ## Test
 
-`sdks/godot/test_project` is a headless test project (the addon folder is a symlink). From the repository root, with the local stack running:
-
-```bash
-pnpm test:godot:local
-```
+`test_project` in the [manalens-godot](https://github.com/manalens/manalens-godot) repo is a headless test project (the addon folder is a symlink). [CONTRIBUTING.md](https://github.com/manalens/manalens-godot/blob/main/CONTRIBUTING.md) says how to run the tests and make a release.

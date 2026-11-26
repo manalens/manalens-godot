@@ -5,7 +5,8 @@
 # Runs the headless test project with a pinned Godot build: the request
 # fixtures against a capture server on 127.0.0.1, and the modes that need no
 # network (test_project/run-tests.mjs). The tests against a real collector and
-# Tinybird run in the Manalens monorepo, where this SDK is developed.
+# Tinybird run in the Manalens monorepo, against the commit it pins
+# (CONTRIBUTING.md).
 name: CI
 
 on:

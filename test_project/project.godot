@@ -1,5 +1,5 @@
 ; Headless test project for the Manalens Godot SDK.
-; Run: godot --headless --path sdks/godot/test_project -- --endpoint=http://127.0.0.1:3291 --publishable-key=mana_pk_...
+; Run: godot --headless --path test_project -- --endpoint=http://127.0.0.1:3291 --publishable-key=mana_pk_...
 ; addons/manalens is a symlink to ../../addons/manalens.
 
 config_version=5
