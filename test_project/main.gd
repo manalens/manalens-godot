@@ -185,6 +185,14 @@ func _link(_run_id: String, result: Dictionary) -> void:
 	await sdk.shutdown()
 
 
+## An HTTP date (RFC 9110 IMF-fixdate) for a Unix time.
+func _http_date(unix: int) -> String:
+	var d := Time.get_datetime_dict_from_unix_time(unix)
+	var days := ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+	var months := ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+	return "%s, %02d %s %d %02d:%02d:%02d GMT" % [days[d.weekday], d.day, months[d.month - 1], d.year, d.hour, d.minute, d.second]
+
+
 func _session_age(_run_id: String, result: Dictionary) -> void:
 	_fresh()
 	var sdk = Manalens
@@ -221,6 +229,35 @@ func _session_age(_run_id: String, result: Dictionary) -> void:
 	result["refusal_reason"] = reason
 	_check(reason.contains("INVALID_EVENT") and reason.contains("SESSION_ID_REQUIRED"), "refusal reason: %s" % reason)
 	_check(sdk._refusal_reason("not json".to_utf8_buffer()) == "", "a body that is not JSON gave a reason")
+	# P-2794: Retry-After on a retried response (seconds or an HTTP date, at most 1 hour).
+	var now := 1800000000.0
+	var date_90 := Time.get_datetime_string_from_unix_time(int(now) + 90)
+	var http_90 := _http_date(int(now) + 90)
+	var retry_cases := [
+		[PackedStringArray(["Content-Type: application/json", "Retry-After: 120"]), 120.0],
+		[PackedStringArray(["retry-after:  60 "]), 60.0],
+		[PackedStringArray(["RETRY-AFTER: 0"]), 0.0],
+		[PackedStringArray(["Retry-After: %s" % http_90]), 90.0],
+		[PackedStringArray(["Retry-After: %s" % _http_date(int(now) - 1000)]), 0.0],
+		[PackedStringArray([]), 0.0],
+		[PackedStringArray(["Retry-After: soon"]), 0.0],
+		[PackedStringArray(["Retry-After: -5"]), 0.0],
+		[PackedStringArray(["Retry-After: 1.5"]), 0.0],
+		[PackedStringArray(["Retry-After: %s" % date_90]), 0.0],
+		[PackedStringArray(["Retry-After: Wed, 99 Foo 2026 07:28:00 GMT"]), 0.0],
+	]
+	var parsed_retry := []
+	for case in retry_cases:
+		var got: float = sdk._parse_retry_after(case[0], now)
+		parsed_retry.append(got)
+		_check(is_equal_approx(got, float(case[1])), "Retry-After %s: %s, expected %s" % [case[0], got, case[1]])
+	result["retry_after_parsed"] = parsed_retry
+	# The wait: the backoff, or Retry-After when longer, at most 1 hour.
+	_check(is_equal_approx(sdk._retry_wait(1.5, PackedStringArray(["Retry-After: 60"]), now), 60.0), "Retry-After 60 is not followed")
+	_check(is_equal_approx(sdk._retry_wait(1.5, PackedStringArray(["Retry-After: 99999"]), now), 3600.0), "Retry-After is not capped at 1 hour")
+	_check(is_equal_approx(sdk._retry_wait(1.5, PackedStringArray(["Retry-After: 1"]), now), 1.5), "a short Retry-After cut the backoff")
+	_check(is_equal_approx(sdk._retry_wait(1.5, PackedStringArray([]), now), 1.5), "no Retry-After changed the backoff")
+	_check(is_equal_approx(sdk._retry_wait(1.5, PackedStringArray(["Retry-After: later"]), now), 1.5), "an invalid Retry-After changed the backoff")
 	# P-2787: refused events of an accepted batch.
 	var partial := '{"accepted":1,"rejected":2,"errors":[{"index":1,"message_id":null,"code":"INVALID_EVENT","message":"m"},{"index":2,"message_id":null,"code":"SESSION_ID_REQUIRED","message":"m"}]}'
 	var refused: Dictionary = sdk._refused_in_accepted(partial.to_utf8_buffer())

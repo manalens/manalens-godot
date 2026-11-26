@@ -45,6 +45,9 @@ const SESSION_MAX_AGE_S := 24.0 * 60.0 * 60.0
 ## The collector accepts app events up to 7 days old. Keep a margin for clock skew.
 const MAX_EVENT_AGE_S := 7.0 * 24.0 * 3600.0 - 3600.0
 const MAX_BACKOFF_S := 300.0
+## The longest wait that a Retry-After header can ask for (1 hour).
+const MAX_RETRY_AFTER_S := 3600.0
+const HTTP_MONTHS := ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 const STOREFRONTS := ["steam", "itch", "epic", "gog", "app_store", "play", "other"]
 ## Project Settings > Manalens (publishable_key, endpoint, auto_init, ...).
 const Settings := preload("res://addons/manalens/settings.gd")
@@ -832,7 +835,56 @@ func _refused_in_accepted(body: PackedByteArray) -> Dictionary:
 	return {"count": int(parsed.rejected), "reason": ", ".join(PackedStringArray(codes.keys()))}
 
 
-func _on_request_completed(result: int, code: int, _headers: PackedStringArray, _body: PackedByteArray) -> void:
+## The wait in seconds that the Retry-After header of a response asks for: an
+## integer number of seconds, or an HTTP date (then the time until that date).
+## A missing or invalid value, or a date in the past, gives 0. Not capped:
+## _retry_wait() applies MAX_RETRY_AFTER_S.
+func _parse_retry_after(headers: PackedStringArray, now: float) -> float:
+	var value := ""
+	var found := false
+	for line in headers:
+		var colon := line.find(":")
+		if colon > 0 and line.substr(0, colon).strip_edges().to_lower() == "retry-after":
+			value = line.substr(colon + 1).strip_edges()
+			found = true
+			break
+	if not found or value == "":
+		return 0.0
+	var digits := true
+	for c in value:
+		if c < "0" or c > "9":
+			digits = false
+			break
+	if digits:
+		return value.to_float()
+	# An HTTP date: "Wed, 21 Oct 2026 07:28:00 GMT".
+	var parts := value.replace(",", " ").split(" ", false)
+	if parts.size() != 6 or parts[5].to_upper() != "GMT":
+		return 0.0
+	var month := HTTP_MONTHS.find(parts[2].to_lower())
+	var clock := parts[4].split(":")
+	if month < 0 or not parts[1].is_valid_int() or not parts[3].is_valid_int() or clock.size() != 3:
+		return 0.0
+	for piece in clock:
+		if not piece.is_valid_int():
+			return 0.0
+	var day := int(parts[1])
+	var hour := int(clock[0])
+	var minute := int(clock[1])
+	var second := int(clock[2])
+	if day < 1 or day > 31 or hour < 0 or hour > 23 or minute < 0 or minute > 59 or second < 0 or second > 60:
+		return 0.0
+	var at := Time.get_unix_time_from_datetime_dict({"year": int(parts[3]), "month": month + 1, "day": day, "hour": hour, "minute": minute, "second": second})
+	return maxf(0.0, float(at) - now)
+
+
+## The wait before the next try after a retried response: the backoff with
+## jitter, or the Retry-After of the response when it is longer (at most 1 hour).
+func _retry_wait(backoff: float, headers: PackedStringArray, now: float) -> float:
+	return maxf(backoff, minf(MAX_RETRY_AFTER_S, _parse_retry_after(headers, now)))
+
+
+func _on_request_completed(result: int, code: int, headers: PackedStringArray, _body: PackedByteArray) -> void:
 	var count := _in_flight.size()
 	var ok := result == HTTPRequest.RESULT_SUCCESS and code >= 200 and code < 300
 	# A 4xx other than 408 and 429 will fail again: drop the batch (as the
@@ -863,9 +915,11 @@ func _on_request_completed(result: int, code: int, _headers: PackedStringArray, 
 	else:
 		_failures += 1
 		var delay := minf(MAX_BACKOFF_S, pow(2.0, float(_failures)))
-		_backoff_until = _now() + delay * randf_range(0.5, 1.0)
+		# Wait at least what the collector asks for (Retry-After on a 429 or 503), at most 1 hour.
+		var wait := _retry_wait(delay * randf_range(0.5, 1.0), headers, _now())
+		_backoff_until = _now() + wait
 		if _options.debug:
-			print("Manalens: send failed (result %d, HTTP %d); retry in %.0f s" % [result, code, delay])
+			print("Manalens: send failed (result %d, HTTP %d); retry in %.0f s" % [result, code, wait])
 	_in_flight.clear()
 	_sending = false
 	_save_queue()
