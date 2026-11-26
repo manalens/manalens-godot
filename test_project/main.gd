@@ -2,7 +2,7 @@ extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
 ##   --publishable-key=KEY  a project publishable key (required)
-##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, disabled, overflow, optout, corrupt, marker or fixtures
+##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, disabled, overflow, optout, corrupt, marker or fixtures
 ##   In a web export, the same arguments come from the page URL (?mode=web_id&endpoint=...&publishable-key=...).
 ##   --run-id=ID          tag for the events (default: random)
 ##
@@ -27,6 +27,15 @@ extends Node
 ## web_reload: a launch that ends without a quit (a reloaded or closed tab), then
 ##           a second launch. On web: no app_unclean_exit; on windows (the
 ##           control): one. The old session ends in both. Needs no network.
+##
+## install_kill: a first launch with no network is killed before any send, tick,
+##           focus loss or quit. game_open (is_first_open) is on disk at once,
+##           and the next launch, 3 days later, still has it with its original
+##           time (P-2773, G-2522). Needs no network.
+##
+## shutdown_tick: shutdown() waits for a send that never ends while the tick
+##           timer fires. No new session starts after session_end. Needs no
+##           network.
 ##
 ## web_id, web_optout, web_after_optout, web_legacy: web export only
 ##           (scripts/test-godot-web.mjs, P-2791). web_id starts the SDK and
@@ -71,6 +80,8 @@ func _ready() -> void:
 		"link": await _link(run_id, result)
 		"session_age": await _session_age(run_id, result)
 		"web_reload": await _web_reload(run_id, result)
+		"install_kill": _install_kill(result)
+		"shutdown_tick": await _shutdown_tick(result)
 		"web_id": _web_id(result)
 		"web_optout": _web_optout(result)
 		"web_after_optout": _web_after_optout(result)
@@ -271,6 +282,78 @@ func _web_reload(_run_id: String, result: Dictionary) -> void:
 		second._initialized = false
 		second.queue_free()
 	_fresh()
+
+
+func _install_kill(result: Dictionary) -> void:
+	_fresh()
+	var sdk_script = load("res://fixture_sdk.gd")
+	var first = sdk_script.new()
+	add_child(first)
+	first.init(_fixture_options(OFFLINE_ENDPOINT, {}))
+	var opened: String = first.get_anonymous_id()
+	var started: float = first.clock
+	# Killed now: no send, no tick, no focus loss, no quit. Only the disk survives.
+	_stop(first)
+	var on_disk = JSON.parse_string(FileAccess.get_file_as_string("user://manalens_queue.json"))
+	var saved := 0
+	if typeof(on_disk) == TYPE_ARRAY:
+		for entry in on_disk:
+			if String(entry.event.get("event", "")) == "game_open" and bool(entry.event.properties.get("is_first_open", false)):
+				saved += 1
+	result["first_open_on_disk"] = saved
+	_check(saved == 1, "game_open with is_first_open is not on disk before any send")
+	var second = sdk_script.new()
+	second.clock = started + 3 * 86400.0
+	second.next_id = first.next_id
+	add_child(second)
+	second.init(_fixture_options(OFFLINE_ENDPOINT, {}))
+	var opens: Array = []
+	for entry in second._queue:
+		if String(entry.event.get("event", "")) == "game_open":
+			opens.append(entry.event)
+	result["game_opens"] = opens.size()
+	_check(opens.size() == 2, "expected 2 game_open events after the relaunch, got %d" % opens.size())
+	if opens.size() == 2:
+		_check(bool(opens[0].properties.is_first_open), "the first game_open lost is_first_open")
+		_check(String(opens[0].original_timestamp) == "2027-01-15T08:00:00.000Z", "the first game_open has the time %s, not the time it happened" % opens[0].original_timestamp)
+		_check(not bool(opens[1].properties.is_first_open), "the second game_open has is_first_open")
+		_check(String(opens[0].anonymous_id) == opened and String(opens[1].anonymous_id) == opened, "the anonymous ID changed")
+	_stop(second)
+	first.queue_free()
+	second.queue_free()
+	_fresh()
+
+
+func _shutdown_tick(result: Dictionary) -> void:
+	_fresh()
+	# A collector that accepts the connection and never answers: the send
+	# stays open, so shutdown() waits its full 2.5 s while the 1 s tick fires.
+	var server := TCPServer.new()
+	_check(server.listen(0, "127.0.0.1") == OK, "could not listen")
+	var sdk = load("res://fixture_sdk.gd").new()
+	sdk.hold = false
+	add_child(sdk)
+	sdk.init(_fixture_options("http://127.0.0.1:%d" % server.get_local_port(), {"flush_interval_s": 1.0, "quit_timeout_s": 2.5}))
+	await sdk.shutdown()
+	server.stop()
+	var names: Array = []
+	for entry in sdk._queue:
+		names.append(String(entry.event.get("event", entry.event.type)))
+	result["queue"] = names
+	_check(names.size() > 0 and names[-1] == "session_end", "the queue does not end with session_end: %s" % [names])
+	_check(names.count("session_start") == 1, "a tick during shutdown() started a new session: %s" % [names])
+	_stop(sdk)
+	sdk.queue_free()
+	_fresh()
+
+
+func _stop(sdk) -> void:
+	sdk._timer.stop()
+	sdk.set_process(false)
+	if sdk._error_logger != null:
+		OS.remove_logger(sdk._error_logger)
+		sdk._error_logger = null
+	sdk._initialized = false
 
 
 func _web_id(result: Dictionary) -> void:
@@ -509,7 +592,7 @@ func _fixture_options(endpoint: String, values: Dictionary) -> Dictionary:
 
 
 func _fresh() -> void:
-	for path in ["user://manalens.cfg", "user://manalens_queue.json", "user://manalens_optout", "user://manalens.cfg.unreadable", "user://manalens.cfg.tmp"]:
+	for path in ["user://manalens.cfg", "user://manalens_queue.json", "user://manalens_queue.json.tmp", "user://manalens_optout", "user://manalens.cfg.unreadable", "user://manalens.cfg.tmp"]:
 		if FileAccess.file_exists(path):
 			DirAccess.remove_absolute(path)
 

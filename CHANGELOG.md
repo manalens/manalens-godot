@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fixed: a quit added an empty session. While `shutdown()` waited for the last send, the flush timer could fire and start a new session after `session_end`. So each quit counted one extra session with no events. Found in the `with-unity` example run (P-2676).
+- Fixed: an install could be lost. `game_open` (with `is_first_open`) and `app_unclean_exit` stayed only in memory until the next save of the queue (a full batch, the flush timer, focus loss, or quit). A first launch with no network that was killed before then lost the install, and the next launch sent `is_first_open` false. Now the queue is written to disk as soon as these events are queued, before any send (P-2773).
+- Fixed: the queue file is written to a temporary file and then renamed, as the state file. A crash during a write no longer leaves a cut-off queue.
 - Fixed: in a web export, a reload right after a save lost the state. `user://` reaches IndexedDB only a moment after a write, so the next load made a new anonymous ID (10 of 10 tries), and an opt-out followed by an immediate reload started tracking again. Now the state, the queue and the opt-out marker are in the browser's `localStorage`, written at once, under a key with the project's user data folder. A file of 0.1.0 moves to `localStorage` on the first read. Without `localStorage`, `user://` as before (P-2791).
 - Fixed: a web export sent `app_unclean_exit` after every reload or closed tab. A browser tab has no quit event, so the SDK does no crash detection on web. The old session still ends at its last activity. Found in the Unity WebGL test (P-2534).
 - Fixed: `identify()` did not send the traits. The traits were kept next to the event in the queue, not in the event. Found by the shared request fixtures (`sdks/SPEC.md`).

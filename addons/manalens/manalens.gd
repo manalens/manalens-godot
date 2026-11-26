@@ -479,7 +479,8 @@ func _on_tick() -> void:
 	if not _identity_active:
 		return
 	# While the game has focus the player is active: keep the session alive.
-	if _focused:
+	# Only an open one: during shutdown() a tick must not start a new session.
+	if _focused and _session_id != "":
 		_touch()
 	_save_session()
 	_save_queue()
@@ -535,6 +536,9 @@ func _start_identity() -> void:
 	_start_session(now)
 	_enqueue(_build("track", "game_open", {"is_first_open": first_open, "first_open_at": String(_cfg.get_value("identity", "first_open_at", _iso(now)))}))
 	_save_cfg()
+	# Write game_open (the install signal) and app_unclean_exit to disk before
+	# any send: a process killed before the next save would lose them.
+	_save_queue()
 	if _deferred_identify != null:
 		var pending: Array = _deferred_identify
 		_deferred_identify = null
@@ -864,12 +868,15 @@ func _save_queue() -> void:
 		if _store_write(QUEUE_PATH, JSON.stringify(_queue)):
 			_queue_dirty = false
 		return
-	var file := FileAccess.open(QUEUE_PATH, FileAccess.WRITE)
+	# Write a temp file, then rename, so a crash never leaves a cut-off queue.
+	var tmp := QUEUE_PATH + ".tmp"
+	var file := FileAccess.open(tmp, FileAccess.WRITE)
 	if file == null:
 		return
 	file.store_string(JSON.stringify(_queue))
 	file.close()
-	_queue_dirty = false
+	if DirAccess.rename_absolute(tmp, QUEUE_PATH) == OK:
+		_queue_dirty = false
 
 
 # Errors ----------------------------------------------------------------------
