@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Each request sends `sent_at`, the device clock at the time of the send. The collector uses it to correct the event times, so a device clock that is fast or slow no longer gives wrong times or refused events (P-2799).
+
 ## 0.1.3 (2026-11-26)
 
 - Setup without code (G-2532): **Project > Project Settings > Manalens > General** (publishable_key, endpoint, auto_init, consent_required; app_version, build and storefront under Advanced Settings). With a key and auto_init on, the autoload starts the SDK at the end of the first frame. `init()` called earlier wins, and its options override the settings.

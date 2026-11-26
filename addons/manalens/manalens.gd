@@ -341,7 +341,8 @@ func flush() -> void:
 	var url := String(_options.endpoint).trim_suffix("/") + "/v0/events"
 	var headers := PackedStringArray(["Content-Type: application/json", "x-publishable-key: %s" % _options.publishable_key])
 	_sending = true
-	var error := _http.request(url, headers, HTTPClient.METHOD_POST, JSON.stringify({"events": batch}))
+	# sent_at: the device clock now. The collector corrects the event times with it, so a wrong clock gives right times (P-2799).
+	var error := _http.request(url, headers, HTTPClient.METHOD_POST, JSON.stringify({"events": batch, "sent_at": _iso(_now())}))
 	if error != OK:
 		_on_request_completed(HTTPRequest.RESULT_CANT_CONNECT, 0, PackedStringArray(), PackedByteArray())
 
