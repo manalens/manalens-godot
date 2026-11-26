@@ -34,8 +34,8 @@ extends Node
 ##           time (P-2773, G-2522). Needs no network.
 ##
 ## shutdown_tick: shutdown() waits for a send that never ends while the tick
-##           timer fires. No new session starts after session_end. Needs no
-##           network.
+##           timer fires and the window gets focus. No new session starts
+##           after session_end. Needs no network.
 ##
 ## web_id, web_optout, web_after_optout, web_legacy: web export only
 ##           (scripts/test-godot-web.mjs, P-2791). web_id starts the SDK and
@@ -334,6 +334,8 @@ func _shutdown_tick(result: Dictionary) -> void:
 	sdk.hold = false
 	add_child(sdk)
 	sdk.init(_fixture_options("http://127.0.0.1:%d" % server.get_local_port(), {"flush_interval_s": 1.0, "quit_timeout_s": 2.5}))
+	# The window gets focus during the shutdown wait.
+	get_tree().create_timer(0.5).timeout.connect(func(): sdk.notification(NOTIFICATION_APPLICATION_FOCUS_IN))
 	await sdk.shutdown()
 	server.stop()
 	var names: Array = []
@@ -341,7 +343,7 @@ func _shutdown_tick(result: Dictionary) -> void:
 		names.append(String(entry.event.get("event", entry.event.type)))
 	result["queue"] = names
 	_check(names.size() > 0 and names[-1] == "session_end", "the queue does not end with session_end: %s" % [names])
-	_check(names.count("session_start") == 1, "a tick during shutdown() started a new session: %s" % [names])
+	_check(names.count("session_start") == 1, "a tick or a focus event during shutdown() started a new session: %s" % [names])
 	_stop(sdk)
 	sdk.queue_free()
 	_fresh()

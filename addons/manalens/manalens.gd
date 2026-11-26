@@ -32,7 +32,7 @@ signal flushed(sent: int, ok: bool)
 signal send_failed(status: int, dropped: int)
 
 const LIBRARY_NAME := "Manalens Godot SDK"
-const LIBRARY_VERSION := "0.1.1"
+const LIBRARY_VERSION := "0.1.2"
 const CONFIG_PATH := "user://manalens.cfg"
 const QUEUE_PATH := "user://manalens_queue.json"
 ## Written by set_consent(false). While it exists the SDK records nothing,
@@ -425,7 +425,9 @@ func _notification(what: int) -> void:
 		NOTIFICATION_APPLICATION_FOCUS_IN, NOTIFICATION_APPLICATION_RESUMED:
 			if _identity_active:
 				_focused = true
-				_touch()
+				# Only an open session: after shutdown() the next event starts a new one.
+				if _session_id != "":
+					_touch()
 		NOTIFICATION_PREDELETE:
 			_save_queue()
 
