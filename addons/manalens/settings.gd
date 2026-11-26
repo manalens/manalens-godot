@@ -7,7 +7,8 @@ extends RefCounted
 ## Manalens.init() override them.
 
 const PREFIX := "manalens/general/"
-const STOREFRONTS := ",steam,itch,epic,gog,app_store,play,other"
+const STOREFRONTS := ",steam,itch,epic,gog,app_store,play,psn,xbox,nintendo,other"
+const PLATFORMS := ",windows,macos,linux,web,android,ios,ps5,xbox_series,xbox_one,switch,switch2,other"
 ## key, type, default, hint, hint string, shown without Advanced Settings.
 const ITEMS := [
 	["publishable_key", TYPE_STRING, "", PROPERTY_HINT_NONE, "", true],
@@ -17,6 +18,8 @@ const ITEMS := [
 	["app_version", TYPE_STRING, "", PROPERTY_HINT_NONE, "", false],
 	["build", TYPE_STRING, "", PROPERTY_HINT_NONE, "", false],
 	["storefront", TYPE_STRING, "", PROPERTY_HINT_ENUM_SUGGESTION, STOREFRONTS, false],
+	["platform", TYPE_STRING, "", PROPERTY_HINT_ENUM_SUGGESTION, PLATFORMS, false],
+	["auto_identify", TYPE_STRING, "", PROPERTY_HINT_ENUM_SUGGESTION, ",steam", false],
 	["track_server_builds", TYPE_BOOL, false, PROPERTY_HINT_NONE, "", false],
 ]
 

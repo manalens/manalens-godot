@@ -18,7 +18,7 @@ func _ready() -> void:
         "endpoint": "https://your-collector.example.com",
         "app_version": "1.4.0",
         "build": "571",
-        "storefront": "steam",  # steam, itch, epic, gog, app_store, play, other
+        "storefront": "steam",  # steam, itch, epic, gog, app_store, play, psn, xbox, nintendo, other
     })
 
 func _on_level_completed(level: int, score: int) -> void:
@@ -41,7 +41,7 @@ func _on_signed_in(player_id: String) -> void:
 | `flush()` | Sends queued events now. |
 | `await shutdown()` | Sends `session_end` and flushes, for at most `quit_timeout_s`. |
 
-Options: `enabled` (true; editor runs send events like a live game, and dev and live data go to the same project: to tell test builds apart, set `build` (for example `"dev"`) and filter by it), `publishable_key` and `endpoint` (required), `app_version`, `build`, `storefront`, `consent_required` (false), `flush_interval_s` (10), `flush_at` (20, also the batch size), `max_queue` (1000), `handle_quit` (true), `quit_timeout_s` (2), `capture_engine_errors` (true, Godot 4.5+), `capture_warnings` (false), `max_auto_errors_per_session` (50), `track_server_builds` (false: a dedicated server or `--headless` build sends no `game_open`, sessions or `app_unclean_exit`), `debug` (false).
+Options: `enabled` (true; editor runs send events like a live game, and dev and live data go to the same project: to tell test builds apart, set `build` (for example `"dev"`) and filter by it), `publishable_key` and `endpoint` (required), `app_version`, `build`, `storefront`, `platform` (empty: detected; set `ps5`, `xbox_series`, `xbox_one`, `switch`, or `switch2` in a console port), `auto_identify` (empty; `"steam"` identifies the player by a salted hash of the Steam ID, see below), `consent_required` (false), `flush_interval_s` (10), `flush_at` (20, also the batch size), `max_queue` (1000), `handle_quit` (true), `quit_timeout_s` (2), `capture_engine_errors` (true, Godot 4.5+), `capture_warnings` (false), `max_auto_errors_per_session` (50), `track_server_builds` (false: a dedicated server or `--headless` build sends no `game_open`, sessions or `app_unclean_exit`), `debug` (false).
 
 ## before_send
 
@@ -74,7 +74,7 @@ Manalens.set_before_send(func(event: Dictionary):
 - **Consent:** with `consent_required: true`, no event is recorded and no ID is written until `set_consent(true)`. The choice is saved, so it applies on the next launch too. `identify()` before consent is sent after consent.
 - **Errors:** on Godot 4.5+, `error_logger.gd` (an `OS.add_logger()` logger) collects engine and script errors under a Mutex, and the SDK sends them on the main thread. Limits: the same fingerprint once a second, 20 errors in 10 seconds, 5 engine errors in one frame and 50 in one session. Dropped errors are counted in `session_end` (`errors_dropped`).
 - **Crashes:** when the last run did not exit normally while the game had focus, the next launch sends `app_unclean_exit` in the old session, with `previous_session_id`, `previous_build` and `previous_app_version`. Not on web: a closed or reloaded tab has no quit event.
-- **Context:** `context.app.platform` comes from `OS.get_name()`, `engine` is `godot`, and `app_version`, `build` and `storefront` come from `init()`.
+- **Context:** `context.app.platform` comes from the `platform` option or else `OS.get_name()` (`other` for an unknown name, such as a console port), `engine` is `godot`, and `app_version`, `build` and `storefront` come from `init()`.
 
 ## Web export
 
@@ -88,3 +88,12 @@ itch.io serves HTML5 builds from `html.itch.zone` and `html-classic.itch.zone`. 
 ## Test
 
 `test_project` in the [manalens-godot](https://github.com/manalens/manalens-godot) repo is a headless test project (the addon folder is a symlink). [CONTRIBUTING.md](https://github.com/manalens/manalens-godot/blob/main/CONTRIBUTING.md) says how to run the tests and make a release.
+
+## Identify players by Steam ID (opt-in)
+
+Set `"auto_identify": "steam"` (or **Project Settings > Manalens > Auto Identify** under Advanced Settings). After consent, once per launch, the SDK calls `identify("steam_<hash>", {"storefront": "steam"})` when the [GodotSteam](https://godotsteam.com) addon is present and Steam is running. The hash is the SHA-256 (hex) of `"<publishable_key>:<SteamID64>"`. The raw Steam ID is never sent.
+
+- An `identify()` call from your game wins. After it, the SDK does not identify by Steam in that launch, and a later launch keeps the user ID your game set.
+- Without GodotSteam, or with Steam closed, the SDK does nothing and logs no error. If your game starts Steam after the SDK, the SDK tries again for about one minute.
+- This is pseudonymous, not anonymous. The publishable key ships in your game and Steam IDs are few, so someone can reverse the hash by brute force. The hash keeps the raw ID out of casual view and stops linking one player across projects. A new publishable key gives new user IDs.
+- To store the raw Steam ID (for support), call `identify()` yourself.

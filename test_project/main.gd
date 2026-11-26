@@ -707,6 +707,8 @@ func _more_modes(mode: String, result: Dictionary) -> void:
 		"privacy": await _privacy(result)
 		"before_send": _before_send_mode(result)
 		"server": _server_mode(result)
+		"auto_identify": await _auto_identify_mode(result)
+		"platform": _platform_mode(result)
 		_: _failures.append("unknown mode %s" % mode)
 
 
@@ -942,6 +944,172 @@ func _before_send_mode(result: Dictionary) -> void:
 		sdk._error_logger = null
 	sdk._initialized = false
 	sdk.queue_free()
+	_fresh()
+
+
+## auto_identify: the opt-in Steam identify (P-2513) with a fake GodotSteam
+## singleton. Needs no network. pnpm test:godot runs it after the fixtures.
+func _auto_identify_mode(result: Dictionary) -> void:
+	const STEAM_ID := 76561197960287930
+	# SHA-256 of "mana_pk_fixture:76561197960287930" (the same in every SDK).
+	const EXPECTED := "steam_5995b6bebc38aced1a509474218a3e5fccfe5b3fe26cd3ff82ed1a950b0cffe6"
+	var key := String(_args["publishable-key"])
+	_check(key == "mana_pk_fixture", "auto_identify: the expected hash needs the key mana_pk_fixture, not %s" % key)
+	_check(Manalens.steam_user_id(key, str(STEAM_ID)) == EXPECTED, "auto_identify: wrong hash %s" % Manalens.steam_user_id(key, str(STEAM_ID)))
+	var on := {"flush_at": 50, "auto_identify": "steam"}
+
+	# 1. No GodotSteam addon: nothing happens and nothing fails.
+	_fresh()
+	var plain = await _auto_sdk(on)
+	_check(_identifies(plain).is_empty() and plain._user_id == "", "auto_identify: identified without Steam: %s" % [_identifies(plain)])
+	_check(plain._auto_identify_tries == 0, "auto_identify: still trying without the addon")
+	_stop(plain)
+	plain.queue_free()
+
+	var steam = load("res://fake_steam.gd").new()
+	steam.steam_id = STEAM_ID
+	Engine.register_singleton("Steam", steam)
+
+	# 2. Off by default: Steam is running, but no identify.
+	_fresh()
+	var off = await _auto_sdk({"flush_at": 50})
+	_check(_identifies(off).is_empty(), "auto_identify: identified with the option off")
+	_stop(off)
+	off.queue_free()
+
+	# 3. On: one identify with the hashed ID and storefront = steam.
+	_fresh()
+	var sdk = await _auto_sdk(on)
+	var sent := _identifies(sdk)
+	result["identified"] = sent
+	_check(sent.size() == 1 and String(sent[0].get("user_id", "")) == EXPECTED, "auto_identify: expected one identify as %s: %s" % [EXPECTED, sent])
+	_check(sent.size() == 1 and sent[0].get("traits", {}) == {"storefront": "steam"}, "auto_identify: wrong traits: %s" % [sent])
+	_check(not JSON.stringify(sdk._queue).contains(str(STEAM_ID)), "auto_identify: the raw SteamID64 is in the queue")
+	sdk._on_tick()
+	_check(_identifies(sdk).size() == 1, "auto_identify: identified twice in one launch")
+	_stop(sdk)
+	sdk.queue_free()
+
+	# 4. The next launch identifies again (once per launch) as the same user.
+	DirAccess.remove_absolute("user://manalens_queue.json")  # keep the saved identity, not the old events
+	var next = await _auto_sdk(on)
+	_check(_identifies(next).size() == 1 and next._user_id == EXPECTED, "auto_identify: the next launch did not identify once: %s" % [_identifies(next)])
+	_stop(next)
+	next.queue_free()
+
+	# 5. The game calls identify() right after init(): the game wins.
+	_fresh()
+	var game = load("res://fixture_sdk.gd").new()
+	add_child(game)
+	game.init(_fixture_options(OFFLINE_ENDPOINT, on))
+	game.identify("player-42")
+	await get_tree().process_frame
+	await get_tree().process_frame
+	game._on_tick()
+	var ids := _identifies(game).map(func(event): return String(event.get("user_id", "")))
+	_check(ids == ["player-42"] and game._user_id == "player-42", "auto_identify: the game identify did not win: %s" % [ids])
+	_stop(game)
+	game.queue_free()
+
+	# 6. A user ID that the game set in an earlier launch stays.
+	DirAccess.remove_absolute("user://manalens_queue.json")  # keep the saved identity, not the old events
+	var later = await _auto_sdk(on)
+	_check(_identifies(later).is_empty() and later._user_id == "player-42", "auto_identify: replaced the game's user ID: %s, %s" % [_identifies(later), later._user_id])
+	_stop(later)
+	later.queue_free()
+
+	# 7. Consent: nothing before set_consent(true), then one identify.
+	_fresh()
+	var consent = load("res://fixture_sdk.gd").new()
+	add_child(consent)
+	var with_consent := on.duplicate()
+	with_consent["consent_required"] = true
+	consent.init(_fixture_options(OFFLINE_ENDPOINT, with_consent))
+	await get_tree().process_frame
+	consent._on_tick()
+	_check(consent._queue.is_empty() and consent._user_id == "", "auto_identify: identified before consent")
+	consent.set_consent(true)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	_check(_identifies(consent).size() == 1 and consent._user_id == EXPECTED, "auto_identify: no identify after consent: %s" % [_identifies(consent)])
+	_stop(consent)
+	consent.queue_free()
+
+	# 8. Steam starts after the SDK (ID 0 at first): a later tick identifies.
+	_fresh()
+	steam.steam_id = 0
+	var slow = await _auto_sdk(on)
+	_check(_identifies(slow).is_empty(), "auto_identify: identified with SteamID 0")
+	steam.steam_id = STEAM_ID
+	slow._on_tick()
+	_check(_identifies(slow).size() == 1, "auto_identify: no identify after Steam started")
+	_stop(slow)
+	slow.queue_free()
+
+	# 9. Steam not running: nothing.
+	_fresh()
+	steam.running = false
+	var closed = await _auto_sdk(on)
+	closed._on_tick()
+	_check(_identifies(closed).is_empty(), "auto_identify: identified while Steam is not running")
+	_stop(closed)
+	closed.queue_free()
+
+	# 10. An unknown value is ignored.
+	_fresh()
+	steam.running = true
+	var wrong = await _auto_sdk({"flush_at": 50, "auto_identify": "epic"})
+	_check(_identifies(wrong).is_empty() and String(wrong._options.auto_identify) == "", "auto_identify: an unknown value was used")
+	_stop(wrong)
+	wrong.queue_free()
+
+	Engine.unregister_singleton("Steam")
+	steam.free()
+	_fresh()
+
+
+func _auto_sdk(values: Dictionary):
+	var sdk = load("res://fixture_sdk.gd").new()
+	add_child(sdk)
+	sdk.init(_fixture_options(OFFLINE_ENDPOINT, values))
+	await get_tree().process_frame
+	await get_tree().process_frame
+	return sdk
+
+
+func _identifies(sdk) -> Array:
+	var out := []
+	for item in sdk._queue:
+		if String(item.event.get("type", "")) == "identify":
+			out.append(item.event)
+	return out
+
+
+## platform: the `platform` option names a console build; a wrong value falls
+## back to the detected platform. Console storefronts are accepted (P-2776).
+func _platform_mode(result: Dictionary) -> void:
+	var seen := {}
+	for platform in ["ps5", "xbox_series", "xbox_one", "switch", "switch2"]:
+		_fresh()
+		var sdk = load("res://fixture_sdk.gd").new()
+		add_child(sdk)
+		sdk.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50, "platform": platform}))
+		seen[platform] = sdk._context().app.platform
+		_stop(sdk)
+		sdk.queue_free()
+	result["platforms"] = seen
+	for platform in seen:
+		_check(seen[platform] == platform, "platform: %s was sent as %s" % [platform, seen[platform]])
+	for storefront in ["psn", "xbox", "nintendo"]:
+		_fresh()
+		var store = load("res://fixture_sdk.gd").new()
+		add_child(store)
+		store.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50, "storefront": storefront, "platform": "ps4"}))
+		var app: Dictionary = store._context().app
+		_check(app.get("storefront", "") == storefront, "platform: storefront %s was dropped" % storefront)
+		_check(app.platform == "windows", "platform: the wrong value ps4 was not replaced by the detected platform: %s" % app.platform)
+		_stop(store)
+		store.queue_free()
 	_fresh()
 
 

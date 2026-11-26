@@ -48,7 +48,14 @@ const MAX_BACKOFF_S := 300.0
 ## The longest wait that a Retry-After header can ask for (1 hour).
 const MAX_RETRY_AFTER_S := 3600.0
 const HTTP_MONTHS := ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
-const STOREFRONTS := ["steam", "itch", "epic", "gog", "app_store", "play", "other"]
+const STOREFRONTS := ["steam", "itch", "epic", "gog", "app_store", "play", "psn", "xbox", "nintendo", "other"]
+## The `platform` option: the values the collector accepts. Leave the option
+## empty to detect the platform with OS.get_name().
+const PLATFORMS := ["windows", "macos", "linux", "web", "android", "ios", "ps5", "xbox_series", "xbox_one", "switch", "switch2", "other"]
+const AUTO_IDENTIFY := ["steam"]
+## GodotSteam may start Steam after the SDK. Try again on the flush timer this
+## many times (about one minute with the default flush interval).
+const AUTO_IDENTIFY_TRIES := 6
 ## Project Settings > Manalens (publishable_key, endpoint, auto_init, ...).
 const Settings := preload("res://addons/manalens/settings.gd")
 const SEVERITIES := ["debug", "info", "warning", "error", "critical"]
@@ -80,6 +87,14 @@ var _options := {
 	"app_version": "",
 	"build": "",
 	"storefront": "",
+	## Empty: detected from OS.get_name(). Set it for a console build (a
+	## console port of Godot): ps5, xbox_series, xbox_one, switch or switch2.
+	"platform": "",
+	## "steam": after consent, identify the player once per launch as
+	## steam_<SHA-256 of "<publishable_key>:<SteamID64>"> with the trait
+	## storefront = steam, when the GodotSteam addon is present and Steam is
+	## running. Off ("") by default. An identify() call from the game wins.
+	"auto_identify": "",
 	## true: no events and no persistent ID until set_consent(true).
 	"consent_required": false,
 	"flush_interval_s": 10.0,
@@ -134,6 +149,8 @@ var _in_flight: Array = []  # message IDs of the batch being sent
 var _failures := 0
 var _backoff_until := 0.0
 var _deferred_identify = null  # [user_id, traits] before consent
+var _game_identified := false  # the game called identify() in this launch
+var _auto_identify_tries := 0  # auto_identify attempts left in this launch
 var _http: HTTPRequest
 var _timer: Timer
 var _label_re := RegEx.create_from_string("^[A-Za-z0-9._+\\- ]+$")
@@ -153,7 +170,7 @@ var _quoted_re := RegEx.create_from_string("\"[^\"]*\"|'[^']*'")
 # Public API ------------------------------------------------------------------
 
 ## Start the SDK. Keys: publishable_key, endpoint (required); enabled, app_version, build,
-## storefront, consent_required, flush_interval_s, flush_at, max_queue,
+## storefront, platform, auto_identify, consent_required, flush_interval_s, flush_at, max_queue,
 ## handle_quit, quit_timeout_s, capture_engine_errors, capture_warnings,
 ## max_auto_errors_per_session, track_server_builds, debug. The values of Project Settings >
 ## Manalens apply first; the options override them. With a key in Project
@@ -193,6 +210,13 @@ func init(options: Dictionary = {}) -> void:
 	if String(_options.storefront) != "" and not STOREFRONTS.has(String(_options.storefront)):
 		push_warning("Manalens: storefront must be one of %s; ignored" % [STOREFRONTS])
 		_options.storefront = ""
+	if String(_options.platform) != "" and not PLATFORMS.has(String(_options.platform)):
+		push_warning("Manalens: platform must be one of %s; detected instead" % [PLATFORMS])
+		_options.platform = ""
+	if String(_options.auto_identify) != "" and not AUTO_IDENTIFY.has(String(_options.auto_identify)):
+		push_warning("Manalens: auto_identify must be \"steam\" or empty; ignored")
+		_options.auto_identify = ""
+	_auto_identify_tries = AUTO_IDENTIFY_TRIES if String(_options.auto_identify) != "" else 0
 	_initialized = true
 	_server_quiet = is_server_build() and not bool(_options.track_server_builds)
 	if _server_quiet:
@@ -280,6 +304,8 @@ func set_before_send(callback: Callable) -> void:
 
 
 ## Attach a known player ID (1 to 255 characters) and traits to this device.
+## A call from the game wins over auto_identify: after it, the SDK does not
+## identify the player by Steam in this launch.
 func identify(user_id: String, traits: Dictionary = {}) -> void:
 	if _disabled:
 		return
@@ -289,11 +315,20 @@ func identify(user_id: String, traits: Dictionary = {}) -> void:
 	if user_id.length() < 1 or user_id.length() > 255:
 		push_warning("Manalens: user_id must be 1 to 255 characters")
 		return
+	_game_identified = true
+	_auto_identify_tries = 0
+	_identify(user_id, traits, "game")
+
+
+func _identify(user_id: String, traits: Dictionary, source: String) -> void:
 	if not _identity_allowed():
 		_deferred_identify = [user_id, traits]
 		return
 	_user_id = user_id
 	_cfg.set_value("identity", "user_id", user_id)
+	# Who set the user ID: "game" (identify()) or "steam" (auto_identify). A
+	# later launch never replaces a user ID that the game set.
+	_cfg.set_value("identity", "user_id_source", source)
 	_save_cfg()
 	_touch()
 	var event := _build("identify", "", {})
@@ -315,6 +350,7 @@ func reset() -> void:
 	_user_id = ""
 	_anonymous_id = _uuid()
 	_cfg.set_value("identity", "user_id", "")
+	_cfg.set_value("identity", "user_id_source", "")
 	_cfg.set_value("identity", "anonymous_id", _anonymous_id)
 	_start_session(_now())
 	_save_cfg()
@@ -347,7 +383,7 @@ func set_consent(granted: bool) -> void:
 	_anonymous_id = ""
 	_user_id = ""
 	_session_id = ""
-	for key in ["anonymous_id", "user_id", "first_open_at"]:
+	for key in ["anonymous_id", "user_id", "user_id_source", "first_open_at"]:
 		if _cfg.has_section_key("identity", key):
 			_cfg.erase_section_key("identity", key)
 	if _cfg.has_section("session"):
@@ -552,6 +588,7 @@ func _on_tick() -> void:
 	# Only an open one: during shutdown() a tick must not start a new session.
 	if _focused and _session_id != "":
 		_touch()
+	_try_auto_identify()
 	_save_session()
 	_save_queue()
 	flush()
@@ -613,8 +650,58 @@ func _start_identity() -> void:
 	if _deferred_identify != null:
 		var pending: Array = _deferred_identify
 		_deferred_identify = null
-		identify(pending[0], pending[1])
+		_identify(pending[0], pending[1], "game")
+	# Next frame: an identify() that the game calls right after init() wins.
+	_try_auto_identify.call_deferred()
 	flush()
+
+
+## auto_identify = "steam" (P-2513): identify the player by a salted hash of
+## the SteamID64, once per launch, after consent. Needs the GodotSteam addon
+## (the `Steam` singleton) and a running Steam client; without them it does
+## nothing. Skipped when the game called identify() in this launch, when the
+## saved user ID came from the game, and on a quiet server build.
+func _try_auto_identify() -> void:
+	if _auto_identify_tries <= 0 or _game_identified or not _identity_active or _server_quiet:
+		return
+	_auto_identify_tries -= 1
+	if String(_cfg.get_value("identity", "user_id_source", "game" if _user_id != "" else "")) == "game":
+		_auto_identify_tries = 0
+		return
+	if not Engine.has_singleton("Steam"):
+		_auto_identify_tries = 0  # No GodotSteam addon: nothing to do.
+		return
+	var steam_id := _steam_id()
+	if steam_id == "":
+		return  # Try again on the next tick: the game may start Steam later.
+	_auto_identify_tries = 0
+	_identify(steam_user_id(String(_options.publishable_key), steam_id), {"storefront": "steam"}, "steam")
+
+
+## The SteamID64 of the signed-in Steam user as text, or "" when the GodotSteam
+## addon is missing, Steam is not running, or the ID is 0. Never a hard
+## dependency: the SDK looks the singleton up by name.
+func _steam_id() -> String:
+	if not Engine.has_singleton("Steam"):
+		return ""
+	var steam: Object = Engine.get_singleton("Steam")
+	if steam == null or not steam.has_method("getSteamID"):
+		return ""
+	if steam.has_method("isSteamRunning") and not bool(steam.call("isSteamRunning")):
+		return ""
+	var id = steam.call("getSteamID")
+	if (typeof(id) != TYPE_INT and typeof(id) != TYPE_STRING) or String.num_int64(int(id)) == "0":
+		return ""
+	return String.num_int64(int(id))
+
+
+## The user ID of auto_identify: "steam_" and the SHA-256 (hex) of
+## "<publishable_key>:<SteamID64>". The key is the per-project salt: the same
+## player gets the same ID in one project and a different ID in another. This
+## is pseudonymous, not anonymous: the key ships in the game and SteamIDs are
+## few, so the hash can be reversed by brute force.
+static func steam_user_id(publishable_key: String, steam_id64: String) -> String:
+	return "steam_" + ("%s:%s" % [publishable_key, steam_id64]).sha256_text()
 
 
 func _start_session(at: float) -> void:
@@ -792,7 +879,8 @@ func _build(type: String, event: String, properties: Dictionary, at: float = -1.
 
 
 func _context() -> Dictionary:
-	var app := {"platform": _platform(), "engine": "godot"}
+	var platform := String(_options.platform)
+	var app := {"platform": platform if platform != "" else _platform(), "engine": "godot"}
 	for key in ["app_version", "build", "storefront"]:
 		if String(_options[key]) != "":
 			app[key] = String(_options[key])

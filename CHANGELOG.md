@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- New option `auto_identify` (P-2513), off by default. With `"steam"`, after consent, the SDK identifies the player once per launch as `steam_<hash>` with the trait `storefront` = `steam`, when the GodotSteam addon is present and Steam is running. The hash is the SHA-256 (hex) of `"<publishable_key>:<SteamID64>"`, so the raw Steam ID is never sent. An `identify()` call from the game wins, and a user ID that the game set is never replaced. Without GodotSteam or Steam, the SDK does nothing. Also in **Project Settings > Manalens** under Advanced Settings.
+- Console values (P-2776). New option `platform`: empty (default) detects the platform as before; a console port sets `ps5`, `xbox_series`, `xbox_one`, `switch`, or `switch2`. `storefront` also accepts `psn`, `xbox`, and `nintendo`.
+
 ## 0.1.5 (2026-11-26)
 
 - Dedicated server builds (G-2533): a build with the `dedicated_server` feature tag, or a run with the `headless` display server (`--headless`), sends no `game_open`, `session_start`, `session_end`, or `app_unclean_exit`, and does not count as an install. The SDK prints one line that says why. `track()` and `identify()` still work. The new option `track_server_builds` (default `false`, also in **Project Settings > Manalens** under Advanced Settings) sends the automatic events from a server build. New `Manalens.is_server_build()`. Behavior change: a `--headless` run that used to send `game_open` and sessions now sends them only with `track_server_builds`. See the new docs page "Multiplayer and dedicated servers".

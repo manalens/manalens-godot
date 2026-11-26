@@ -37,6 +37,8 @@ const OFFLINE_MODES = [
   ['disabled', 'enabled = false: no ID, no queue, no files'],
   ['overflow', 'send_failed(0, n) when the queue is over max_queue'],
   ['server', 'a server build sends no game_open or sessions unless track_server_builds'],
+  ['auto_identify', 'auto_identify = steam: one hashed identify per launch, after consent, and the game wins'],
+  ['platform', 'the platform option for console builds; console storefronts'],
 ];
 
 function run(mode, endpoint) {
