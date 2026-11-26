@@ -1,0 +1,71 @@
+# Godot SDK checks on every push to main and every pull request.
+# The release workflow (release.yml) calls this workflow too, so a release runs
+# the same tests.
+#
+# Runs the headless test project with a pinned Godot build: the request
+# fixtures against a capture server on 127.0.0.1, and the modes that need no
+# network (test_project/run-tests.mjs). The tests against a real collector and
+# Tinybird run in the Manalens monorepo, where this SDK is developed.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Change both together. The SHA-256 is of the zip from the Godot release page
+  # (its SHA512-SUMS.txt also lists the file).
+  GODOT_VERSION: 4.7.2-stable
+  GODOT_SHA256: cadd3204e728a35d3f13adb7fd0d7902636b79f6b95c40c265eb73b6c35329e4
+
+jobs:
+  test:
+    name: Headless tests (Godot)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+
+      - name: Check the version and the CHANGELOG
+        run: |
+          VERSION=$(sed -n 's/^version="\(.*\)"$/\1/p' addons/manalens/plugin.cfg)
+          TOP=$(sed -n 's/^## \([^ ]*\).*/\1/p' CHANGELOG.md | head -n 1)
+          echo "plugin.cfg: $VERSION, CHANGELOG top heading: $TOP"
+          test -n "$VERSION" || { echo "::error::No version= in addons/manalens/plugin.cfg"; exit 1; }
+          test "$VERSION" = "$TOP" || { echo "::error::plugin.cfg ($VERSION) and the top CHANGELOG heading ($TOP) differ"; exit 1; }
+
+      - name: Install Godot
+        run: |
+          FILE="Godot_v${GODOT_VERSION}_linux.x86_64"
+          curl --fail --silent --show-error --location --retry 3 \
+            -o "$RUNNER_TEMP/godot.zip" \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}/${FILE}.zip"
+          echo "${GODOT_SHA256}  $RUNNER_TEMP/godot.zip" | sha256sum --check --strict
+          unzip -q "$RUNNER_TEMP/godot.zip" -d "$RUNNER_TEMP/godot"
+          chmod +x "$RUNNER_TEMP/godot/$FILE"
+          echo "GODOT=$RUNNER_TEMP/godot/$FILE" >> "$GITHUB_ENV"
+
+      - name: Run the headless tests
+        run: |
+          "$GODOT" --version
+          node test_project/run-tests.mjs

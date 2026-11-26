@@ -3,3 +3,4 @@
 /.gitattributes export-ignore
 /.gitignore export-ignore
 /icon.png export-ignore
+/.github export-ignore

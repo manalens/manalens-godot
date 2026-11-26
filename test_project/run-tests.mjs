@@ -1,0 +1,102 @@
+// Godot SDK tests that need no network and no Manalens services (sdks/SPEC.md, G-2525).
+// The public repo's CI runs this file; in the monorepo it is `pnpm test:godot`.
+//
+// 1. Mode `fixtures`: the shared fixture scenario against a capture server on
+//    127.0.0.1. The request bodies must equal test_project/fixtures/request-*.json.
+//    A changed body fails; run with UPDATE_FIXTURES=1 to write the new files,
+//    then review the diff.
+// 2. The modes in OFFLINE_MODES: each checks the queue in the process and sends
+//    nothing (the endpoint is a closed port).
+//
+//   node test_project/run-tests.mjs              (GODOT=/path/to/godot when it is not on PATH)
+//   UPDATE_FIXTURES=1 node test_project/run-tests.mjs
+//
+// Needs Godot 4.5 or later (the engine error capture) and Node 20 or later.
+// The monorepo also runs tests/godot-sdk.test.mjs (the fixtures against the
+// collector schema and the Unity fixtures) and `pnpm test:godot:local` (a real
+// collector and Tinybird). Those need the monorepo.
+import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const project = dirname(fileURLToPath(import.meta.url));
+const folder = join(project, 'fixtures');
+const godot = process.env.GODOT || 'godot';
+
+const OFFLINE_MODES = [
+  ['privacy', 'consent and reset clear the error history; engine messages are cleaned'],
+  ['before_send', 'before_send gets every event and cannot break the envelope'],
+  ['optout', 'set_consent(false) writes the opt-out marker and clears the ID'],
+  ['corrupt', 'a config file that cannot be read: record nothing, keep the file'],
+  ['marker', 'the opt-out marker wins when the config file is missing'],
+  ['link', 'link_url() before and after consent'],
+  ['session_age', 'a 24-hour session ends; properties are trimmed'],
+  ['web_reload', 'a launch that ends without a quit, then a second launch'],
+  ['disabled', 'enabled = false: no ID, no queue, no files'],
+  ['overflow', 'send_failed(0, n) when the queue is over max_queue'],
+];
+
+function run(mode, endpoint) {
+  const args = ['--headless', '--path', project, '--', `--endpoint=${endpoint}`, '--publishable-key=mana_pk_fixture', `--mode=${mode}`];
+  return new Promise((resolve, reject) => {
+    const child = spawn(godot, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let text = '';
+    child.stdout.on('data', chunk => { text += chunk; });
+    child.stderr.on('data', chunk => { text += chunk; });
+    const timer = setTimeout(() => child.kill('SIGKILL'), 120_000);
+    child.on('error', reject);
+    child.on('close', code => {
+      clearTimeout(timer);
+      const line = text.split('\n').find(row => row.startsWith('MANALENS_RESULT '));
+      const result = line ? JSON.parse(line.slice('MANALENS_RESULT '.length)) : null;
+      if (!result?.ok) {
+        console.error(text);
+        reject(new Error(`the ${mode} mode failed: ${JSON.stringify(result?.failures ?? result?.error ?? `no MANALENS_RESULT, exit ${code}. Is Godot 4.5+ on PATH, or GODOT set?`)}`));
+      } else resolve(result);
+    });
+  });
+}
+
+// 1. Fixtures.
+const bodies = [];
+const server = createServer(async (request, response) => {
+  let body = '';
+  for await (const chunk of request) body += chunk;
+  if (request.method === 'POST' && request.url === '/v0/events') bodies.push(body);
+  response.writeHead(202, { 'content-type': 'application/json' }).end(JSON.stringify({ accepted: bodies.length }));
+});
+await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+try {
+  await run('fixtures', `http://127.0.0.1:${server.address().port}`);
+} finally {
+  server.close();
+}
+
+const expected = bodies.map((body, index) => ({ name: `request-${index + 1}.json`, body: `${body}\n` }));
+if (process.env.UPDATE_FIXTURES === '1') {
+  mkdirSync(folder, { recursive: true });
+  for (const name of readdirSync(folder).filter(file => /^request-\d+\.json$/.test(file))) rmSync(join(folder, name));
+  for (const { name, body } of expected) writeFileSync(join(folder, name), body);
+  console.log(`wrote ${expected.length} fixtures to ${folder}`);
+} else {
+  const committed = existsSync(folder) ? readdirSync(folder).filter(file => /^request-\d+\.json$/.test(file)).sort() : [];
+  const problems = [];
+  if (committed.join() !== expected.map(item => item.name).sort().join()) problems.push(`files: committed [${committed}], sent [${expected.map(item => item.name)}]`);
+  for (const { name, body } of expected) {
+    if (existsSync(join(folder, name)) && readFileSync(join(folder, name), 'utf8') !== body) problems.push(`${name} changed`);
+  }
+  if (problems.length) {
+    console.error(problems.join('\n'));
+    console.error('Run UPDATE_FIXTURES=1 with this script and review the diff.');
+    process.exit(1);
+  }
+  console.log(`godot sdk: ${expected.length} request bodies match the committed fixtures`);
+}
+
+// 2. Modes with no network: the endpoint is a closed port.
+for (const [mode, note] of OFFLINE_MODES) {
+  await run(mode, 'http://127.0.0.1:9');
+  console.log(`godot sdk: ${mode} mode ok (${note})`);
+}

@@ -52,7 +52,7 @@ extends Node
 ##
 ## fixtures: the shared fixture scenario of sdks/SPEC.md (the steps of the Unity
 ##           FixtureTests) with a fixed clock and sequential IDs. The endpoint
-##           is the capture server of scripts/test-godot-sdk-fixtures.mjs
+##           is the capture server of test_project/run-tests.mjs
 ##           (pnpm test:godot), which writes or checks the request bodies.
 ##
 ## Prints one line `MANALENS_RESULT {json}` and exits 0 on success, 1 on failure.

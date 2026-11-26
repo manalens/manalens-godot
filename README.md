@@ -28,6 +28,17 @@ The full API, the options, and how the queue, sessions, consent, and errors work
 | --- | --- |
 | `addons/manalens/` | The addon. This is the only folder your game needs. |
 | `test_project/` | A Godot project that runs the addon against a collector. It is not in the Asset Library download. |
+| `test_project/run-tests.mjs` | The tests that need no network: the request fixtures and the offline modes. `GODOT=/path/to/godot node test_project/run-tests.mjs` (Godot 4.5 or later, Node 20 or later). |
+| `.github/workflows/` | CI (`ci.yml`) runs the tests above on each pull request. `release.yml` makes a release from a `v*` tag. |
+
+## Releases
+
+Each [release](https://github.com/manalens/manalens-godot/releases) has `manalens-godot-<version>.zip` (the `addons/manalens` folder, `LICENSE`, `README.md`, and `CHANGELOG.md`), `SHA256SUMS`, and the changes from `CHANGELOG.md`. GitHub Actions builds the zip from the tagged commit and attests its build provenance. To check a download:
+
+```bash
+sha256sum --check --ignore-missing SHA256SUMS
+gh attestation verify manalens-godot-<version>.zip --repo manalens/manalens-godot
+```
 
 ## Links
 
