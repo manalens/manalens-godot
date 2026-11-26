@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-11-27)
 
 - New `traits(traits)` (P-2814): set traits on this player, with or without a player ID. Before `identify()` the traits belong to the anonymous ID of this install. The protected traits `email`, `itch_user_id`, `stripe_customer_id`, and `paddle_customer_id` are not sent (one warning). Calls before consent are merged and sent after consent.
 - New `link_steam(ticket)` and the option `steam_link` (P-2815), off by default. With GodotSteam, the SDK asks for a Web API ticket with the identity `manalens` once per launch after consent and posts it to `/v0/link` on the API host (new option `api_endpoint`; default: the `endpoint` with `events.` changed to `api.`). A game can also pass its own ticket bytes. The new `steam_linked(linked, status, code)` signal gives the answer. A refusal is not sent again; a `429` with `Retry-After` of 60 s or less is tried once more, but not after `set_consent(false)` or `reset()` during the wait. Without GodotSteam, the SDK does nothing. Also in **Project Settings > Manalens** under Advanced Settings.
