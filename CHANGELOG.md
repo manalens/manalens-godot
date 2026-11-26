@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-11-26)
 
 - New option `auto_identify` (P-2513), off by default. With `"steam"`, after consent, the SDK identifies the player once per launch as `steam_<hash>` with the trait `storefront` = `steam`, when the GodotSteam addon is present and Steam is running. The hash is the SHA-256 (hex) of `"<publishable_key>:<SteamID64>"`, so the raw Steam ID is never sent. An `identify()` call from the game wins, and a user ID that the game set is never replaced. Without GodotSteam or Steam, the SDK does nothing. Also in **Project Settings > Manalens** under Advanced Settings.
 - Console values (P-2776). New option `platform`: empty (default) detects the platform as before; a console port sets `ps5`, `xbox_series`, `xbox_one`, `switch`, or `switch2`. `storefront` also accepts `psn`, `xbox`, and `nintendo`.

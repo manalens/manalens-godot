@@ -32,7 +32,7 @@ signal flushed(sent: int, ok: bool)
 signal send_failed(status: int, dropped: int)
 
 const LIBRARY_NAME := "Manalens Godot SDK"
-const LIBRARY_VERSION := "0.1.5"
+const LIBRARY_VERSION := "0.2.0"
 const CONFIG_PATH := "user://manalens.cfg"
 const QUEUE_PATH := "user://manalens_queue.json"
 ## Written by set_consent(false). While it exists the SDK records nothing,
