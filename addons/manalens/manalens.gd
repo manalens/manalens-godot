@@ -130,6 +130,7 @@ var _timer: Timer
 var _label_re := RegEx.create_from_string("^[A-Za-z0-9._+\\- ]+$")
 var _closing := false
 var _before_send := Callable()
+var _in_before_send := false
 var _breadcrumbs: Array = []  # the last event names, oldest first
 var _error_seen := {}  # fingerprint -> ticks (ms) of the last send
 var _error_times: Array = []  # ticks (ms) of the errors sent in the last 10 s
@@ -245,9 +246,17 @@ func track_error(message: String, options: Dictionary = {}) -> void:
 	_record_error(message, options, "manual")
 
 
-## A function that gets the properties of each `error` event before it is
-## queued. Return a Dictionary to send (for example without personal data),
-## or null to drop the error. Pass Callable() to remove it.
+## A function that gets each event before it is queued: track events (also
+## error and the automatic events), and identify. It gets a copy of the whole
+## event Dictionary ("type", "event", "properties", "traits", "user_id",
+## "message_id", "anonymous_id", "session_id", "context", ...). Return the
+## event to send (changed or not), or null to drop it. The SDK takes "event",
+## "properties", "traits" and "user_id" from the result; it keeps the other
+## fields. When the result changes or removes "type", "message_id",
+## "anonymous_id", "session_id" or "context.app", the SDK sends the original
+## event. Errors pass the error limits first, so a dropped error still counts
+## in those limits. Do not record events inside the callback: they are
+## dropped. Pass Callable() to remove it.
 func set_before_send(callback: Callable) -> void:
 	_before_send = callback
 
@@ -281,8 +290,10 @@ func reset() -> void:
 	if not _identity_active:
 		_user_id = ""
 		_deferred_identify = null
+		_clear_error_history()
 		return
-	_end_session(_now())
+	_end_session(_now())  # Sends errors_dropped of the old session.
+	_clear_error_history()
 	_user_id = ""
 	_anonymous_id = _uuid()
 	_cfg.set_value("identity", "user_id", "")
@@ -327,6 +338,15 @@ func set_consent(granted: bool) -> void:
 	_queue.clear()
 	if _store_exists(QUEUE_PATH):
 		_store_remove(QUEUE_PATH)
+	_clear_error_history()
+
+
+## Event names and error counts of the old player must never reach a later error.
+func _clear_error_history() -> void:
+	_breadcrumbs.clear()
+	_error_seen.clear()
+	_error_times.clear()
+	_errors_dropped = 0
 
 
 ## Send queued events now (one batch; the rest follows when it succeeds).
@@ -490,7 +510,10 @@ func _process(_delta: float) -> void:
 	_errors_dropped += int(taken[1]) + maxi(0, items.size() - AUTO_ERRORS_PER_FRAME)
 	for item in items.slice(0, AUTO_ERRORS_PER_FRAME):
 		var kind := String(item.kind)
-		_record_error(String(item.message), {
+		# A log line can hold paths, URLs, emails, and tokens: clean it before it
+		# is queued. The fingerprint is computed from the cleaned text, so the
+		# same error on two machines with different user names groups together.
+		_record_error(_clean_log_message(String(item.message), _home_dirs()), {
 			"severity": "warning" if kind == "warning" else "error",
 			"error_type": "engine_warning" if kind == "warning" else ("script_error" if kind == "script" else "engine_error"),
 			"handled": false,
@@ -766,7 +789,14 @@ func _context() -> Dictionary:
 	return context
 
 
-func _enqueue(entry: Dictionary) -> void:
+## Queues an event after before_send. Returns false when before_send dropped it.
+func _enqueue(entry: Dictionary) -> bool:
+	var envelope = _apply_before_send(entry.event)
+	if envelope == null:
+		if _options.debug:
+			print("Manalens: before_send dropped %s %s" % [entry.event.type, entry.event.get("event", "")])
+		return false
+	entry.event = envelope
 	var name := String(entry.event.get("event", ""))
 	if entry.event.type == "track" and name != "error":
 		_breadcrumbs.append(name)
@@ -783,6 +813,59 @@ func _enqueue(entry: Dictionary) -> void:
 	if _queue.size() >= int(_options.flush_at):
 		_save_queue()
 		flush()
+	return true
+
+
+## Runs before_send on a copy of the envelope. Returns the envelope to queue,
+## or null to drop it.
+func _apply_before_send(envelope: Dictionary) -> Variant:
+	if not _before_send.is_valid():
+		return envelope
+	if _in_before_send:
+		push_warning("Manalens: an event recorded inside before_send is dropped")
+		return null
+	_in_before_send = true
+	var changed = _before_send.call(envelope.duplicate(true))
+	_in_before_send = false
+	if changed == null:
+		return null
+	if typeof(changed) != TYPE_DICTIONARY:
+		push_warning("Manalens: before_send must return a Dictionary or null; event dropped")
+		return null
+	var out := envelope.duplicate()
+	var ok := true
+	for key in ["type", "message_id", "anonymous_id", "session_id"]:
+		if envelope.has(key) != changed.has(key) or (envelope.has(key) and str(changed[key]) != str(envelope[key])):
+			ok = false
+	var context = changed.get("context")
+	if typeof(context) != TYPE_DICTIONARY or typeof(context.get("app")) != TYPE_DICTIONARY or context.app != envelope.context.app:
+		ok = false
+	if envelope.has("event"):
+		var name = changed.get("event")
+		if (typeof(name) != TYPE_STRING and typeof(name) != TYPE_STRING_NAME) or String(name).length() < 1 or String(name).length() > 128:
+			ok = false
+		else:
+			out["event"] = String(name)
+	for field in ["properties", "traits"]:
+		if envelope.has(field):
+			if typeof(changed.get(field, {})) != TYPE_DICTIONARY:
+				ok = false
+			else:
+				out[field] = _fit(_scalars(changed.get(field, {})), field)
+	var user = changed.get("user_id")
+	var user_is_text := typeof(user) == TYPE_STRING or typeof(user) == TYPE_STRING_NAME
+	if user == null or (user_is_text and String(user) == ""):
+		out.erase("user_id")
+	elif user_is_text and String(user).length() <= 255:
+		out["user_id"] = String(user)
+	else:
+		ok = false
+	if envelope.type == "identify" and not out.has("user_id"):
+		ok = false
+	if not ok:
+		push_warning("Manalens: before_send changed or removed type, message_id, anonymous_id, session_id, context.app, or gave a wrong event, properties, traits or user_id; the original event is sent")
+		return envelope
+	return out
 
 
 ## Drop events the collector would refuse as more than 7 days old.
@@ -1012,18 +1095,12 @@ func _record_error(message: String, options: Dictionary, source: String) -> void
 	if not _error_allowed(String(props.fingerprint), source):
 		_errors_dropped += 1
 		return
-	if _before_send.is_valid():
-		var changed = _before_send.call(props)
-		if changed == null:
-			return
-		if typeof(changed) != TYPE_DICTIONARY:
-			push_warning("Manalens: before_send must return a Dictionary or null; error dropped")
-			return
-		props = _scalars(changed)
+	_touch()
+	# before_send runs in _enqueue, after the fingerprint and the limits.
+	if not _enqueue(_build("track", "error", props)):
+		return
 	if source != "manual":
 		_auto_errors += 1
-	_touch()
-	_enqueue(_build("track", "error", props))
 	# Keep the error on disk now: a crash can follow it.
 	_save_queue()
 
@@ -1055,6 +1132,259 @@ func _fingerprint(error_type: String, message: String, file: String, function: S
 	else:
 		basis = "%s|%s" % [error_type, _number_re.sub(_quoted_re.sub(message, "?", true), "N", true)]
 	return basis.sha1_text().left(16)
+
+
+# Cleaning of captured engine messages (the rules of the Unreal plugin) --------
+
+## The player's home folder, as the OS names it. Paths under it become ~.
+func _home_dirs() -> Array:
+	var dirs := []
+	for name in ["HOME", "USERPROFILE"]:
+		var value := OS.get_environment(name)
+		if value != "":
+			dirs.append(value)
+	return dirs
+
+
+## Removes personal data from an engine log message: the home folder and
+## /Users/<name>, /home/<name>, X:\Users\<name> become ~; URLs lose their
+## user, query, and fragment; emails become [email]; the values after key=,
+## token=, secret=, password=, authorization: and bearer, and runs of 24 or
+## more letters, digits, _ and - become [redacted]. track_error() text is not
+## changed.
+func _clean_log_message(message: String, home_dirs: Array) -> String:
+	var text := message
+	for dir in home_dirs:
+		text = _clean_dir(text, String(dir))
+	text = _clean_home_patterns(text)
+	text = _clean_urls(text)
+	text = _clean_emails(text)
+	text = _clean_key_values(text)
+	return _clean_long_tokens(text)
+
+
+static func _is_alnum(c: int) -> bool:
+	return (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or (c >= 48 and c <= 57)
+
+
+static func _is_separator(c: int) -> bool:
+	return c == 47 or c == 92  # / and \
+
+
+static func _is_token_char(c: int) -> bool:
+	return _is_alnum(c) or c == 95 or c == 45  # _ and -
+
+
+## Whitespace, quotes, < > ( ): the end of a path, URL, or value.
+static func _is_end(c: int) -> bool:
+	return c in [32, 9, 10, 11, 12, 13, 34, 39, 60, 62, 40, 41]
+
+
+static func _is_email_local(c: int) -> bool:
+	return _is_alnum(c) or c in [46, 95, 37, 43, 45]  # . _ % + -
+
+
+static func _is_email_domain(c: int) -> bool:
+	return _is_alnum(c) or c == 46 or c == 45
+
+
+## Each occurrence of a directory (and so the path under it) becomes ~.
+func _clean_dir(text: String, dir: String) -> String:
+	dir = dir.replace("\\", "/")
+	while dir.length() > 0 and _is_separator(dir.unicode_at(dir.length() - 1)):
+		dir = dir.left(-1)
+	if dir.length() < 3:
+		return text
+	for form in [dir, dir.replace("/", "\\")]:
+		var from := 0
+		while true:
+			var at := text.findn(form, from)
+			if at < 0:
+				break
+			var end: int = at + form.length()
+			if end < text.length() and not _is_separator(text.unicode_at(end)) and not _is_end(text.unicode_at(end)):
+				from = end  # A longer name, for example /Users/annabel for /Users/anna.
+				continue
+			text = text.left(at) + "~" + text.substr(end)
+			from = at + 1
+	return text
+
+
+## /Users/<name>, /home/<name>, and X:\Users\<name> become ~.
+func _clean_home_patterns(text: String) -> String:
+	var out := PackedStringArray()
+	var index := 0
+	var start := 0
+	while index < text.length():
+		var name_at := -1
+		var rest := text.substr(index, 9).to_lower()
+		var boundary := index == 0 or not (_is_alnum(text.unicode_at(index - 1)) or text.unicode_at(index - 1) == 95)
+		if rest.begins_with("/users/"):
+			name_at = index + 7
+		elif rest.begins_with("/home/"):
+			name_at = index + 6
+		elif boundary and rest.length() == 9 and rest.unicode_at(0) >= 97 and rest.unicode_at(0) <= 122 and rest.unicode_at(1) == 58 \
+				and _is_separator(rest.unicode_at(2)) and rest.substr(3, 5) == "users" and _is_separator(rest.unicode_at(8)):
+			name_at = index + 9
+		if name_at >= 0:
+			var end := name_at
+			while end < text.length() and not _is_separator(text.unicode_at(end)) and not _is_end(text.unicode_at(end)):
+				end += 1
+			if end > name_at:
+				out.append(text.substr(start, index - start))
+				out.append("~")
+				index = end
+				start = end
+				continue
+		index += 1
+	out.append(text.substr(start))
+	return "".join(out)
+
+
+## scheme://user:pass@host/path?query#fragment becomes scheme://host/path.
+func _clean_urls(text: String) -> String:
+	var from := 0
+	while true:
+		var at := text.find("://", from)
+		if at < 0:
+			break
+		var end := at + 3
+		while end < text.length() and not _is_end(text.unicode_at(end)):
+			end += 1
+		var rest := text.substr(at + 3, end - at - 3)
+		for index in rest.length():
+			if rest.unicode_at(index) == 63 or rest.unicode_at(index) == 35:  # ? and #
+				rest = rest.left(index)
+				break
+		var slash := rest.find("/")
+		var authority := rest if slash < 0 else rest.left(slash)
+		var path := "" if slash < 0 else rest.substr(slash)
+		var at_sign := authority.rfind("@")
+		if at_sign >= 0:
+			authority = authority.substr(at_sign + 1)
+		var clean := authority + path
+		text = text.left(at + 3) + clean + text.substr(end)
+		from = at + 3 + clean.length()
+	return text
+
+
+func _clean_emails(text: String) -> String:
+	var at := 0
+	while at < text.length():
+		if text.unicode_at(at) == 64:  # @
+			var start := at
+			while start > 0 and _is_email_local(text.unicode_at(start - 1)):
+				start -= 1
+			var end := at + 1
+			while end < text.length() and _is_email_domain(text.unicode_at(end)):
+				end += 1
+			while end > at + 1 and (text.unicode_at(end - 1) == 46 or text.unicode_at(end - 1) == 45):
+				end -= 1  # A full stop after the address.
+			if start < at and text.substr(at + 1, end - at - 1).contains("."):
+				text = text.left(start) + "[email]" + text.substr(end)
+				at = start + 6
+		at += 1
+	return text
+
+
+## The value after key, token, secret, password, or authorization with = or :
+## (also the JSON form "token": "...") and after bearer. A quoted value is
+## redacted up to its closing quote.
+func _clean_key_values(text: String) -> String:
+	const REDACTED := "[redacted]"
+	# bearer first, so "token: Bearer abc" loses both words.
+	for name in ["bearer", "authorization", "key", "token", "secret", "password"]:
+		var from := 0
+		while true:
+			var at := text.findn(name, from)
+			if at < 0:
+				break
+			var start: int = at + name.length()
+			if name == "bearer":
+				if start >= text.length() or text.unicode_at(start) != 32:
+					from = at + 1
+					continue
+			else:
+				if start < text.length() and text.unicode_at(start) in [34, 39]:
+					start += 1  # the closing quote of a JSON key
+				while start < text.length() and text.unicode_at(start) == 32:
+					start += 1
+				if start >= text.length() or not (text.unicode_at(start) in [58, 61]):  # : and =
+					from = at + 1
+					continue
+				start += 1
+			while start < text.length() and text.unicode_at(start) == 32:
+				start += 1
+			var end := start
+			if start < text.length() and text.unicode_at(start) in [34, 39]:
+				# A quoted value: up to the closing quote (or the end of the text).
+				var quote := text.substr(start, 1)
+				start += 1
+				end = text.find(quote, start)
+				if end < 0:
+					end = text.length()
+			elif name == "authorization":
+				# Authorization: <scheme> <credentials>, to the end of the line.
+				while end < text.length() and not (text.unicode_at(end) in [10, 13, 34, 39]):
+					end += 1
+			else:
+				while end < text.length() and not _is_end(text.unicode_at(end)) and not (text.unicode_at(end) in [38, 44, 59, 93, 125]):  # & , ; ] }
+					end += 1
+			if end > start and text.substr(start, end - start) != REDACTED:
+				text = text.left(start) + REDACTED + text.substr(end)
+				end = start + REDACTED.length()
+			from = maxi(end, at + 1)
+	return text
+
+
+static func _is_base64_char(c: int) -> bool:
+	return _is_token_char(c) or c == 43 or c == 47 or c == 61  # + / =
+
+
+## Keys, tokens, and IDs: a JWT (eyJ... with two dots), a base64 run of 24 or
+## more characters with + or a trailing =, and runs of 24 or more characters
+## from A-Z, a-z, 0-9, _, and -. File paths (with / but no + or =) stay.
+func _clean_long_tokens(text: String) -> String:
+	var out := PackedStringArray()
+	var index := 0
+	var start := 0
+	while index < text.length():
+		var end := index
+		while end < text.length() and _is_token_char(text.unicode_at(end)):
+			end += 1
+		var redact_to := -1
+		if text.substr(index, 3) == "eyJ":
+			var jwt_end := index
+			var dots := 0
+			while jwt_end < text.length() and (_is_token_char(text.unicode_at(jwt_end)) or text.unicode_at(jwt_end) == 46):
+				if text.unicode_at(jwt_end) == 46:
+					dots += 1
+				jwt_end += 1
+			while jwt_end > index and text.unicode_at(jwt_end - 1) == 46:
+				jwt_end -= 1  # a full stop after the token
+				dots -= 1
+			if dots >= 2:
+				redact_to = jwt_end
+		if redact_to < 0:
+			var b64_end := index
+			while b64_end < text.length() and _is_base64_char(text.unicode_at(b64_end)):
+				b64_end += 1
+			var run := text.substr(index, b64_end - index)
+			if run.length() >= 24 and (run.contains("+") or run.ends_with("=")):
+				redact_to = b64_end
+		if redact_to < 0 and end - index >= 24:
+			redact_to = end
+		if redact_to >= 0:
+			out.append(text.substr(start, index - start))
+			out.append("[redacted]")
+			start = redact_to
+			index = redact_to
+		elif end > index:
+			index = end
+		else:
+			index += 1
+	out.append(text.substr(start))
+	return "".join(out)
 
 
 # Helpers ---------------------------------------------------------------------

@@ -37,11 +37,32 @@ func _on_signed_in(player_id: String) -> void:
 | `reset()` | Ends the session, forgets the player ID, makes a new anonymous ID and starts a new session. |
 | `set_consent(granted)` | Consent mode. `true` starts tracking; `false` deletes the ID, the session and the queue. |
 | `track_error(message, options)` | Sends an `error` event. Options: `severity`, `error_type`, `handled`, `stack`, `file`, `line`, `function`, `fingerprint`, `properties`. |
-| `set_before_send(callable)` | Changes each error's properties before it is queued; return null to drop the error. |
+| `set_before_send(callable)` | Gets a copy of each event (track, identify, error, automatic events) before it is queued; return it (changed or not), or null to drop it. See [before_send](#before_send). |
 | `flush()` | Sends queued events now. |
 | `await shutdown()` | Sends `session_end` and flushes, for at most `quit_timeout_s`. |
 
 Options: `enabled` (true; editor runs send events like a live game, and dev and live data go to the same project: to tell test builds apart, set `build` (for example `"dev"`) and filter by it), `publishable_key` and `endpoint` (required), `app_version`, `build`, `storefront`, `consent_required` (false), `flush_interval_s` (10), `flush_at` (20, also the batch size), `max_queue` (1000), `handle_quit` (true), `quit_timeout_s` (2), `capture_engine_errors` (true, Godot 4.5+), `capture_warnings` (false), `max_auto_errors_per_session` (50), `debug` (false).
+
+## before_send
+
+The callback gets the whole event (`type`, `event`, `properties`, `traits`, `user_id`, `message_id`, `anonymous_id`, `session_id`, `context`). The SDK takes `event`, `properties`, `traits`, and `user_id` from the result. If the result changes or removes `type`, `message_id`, `anonymous_id`, `session_id`, or `context.app`, the SDK sends the original event. Errors pass the error limits first.
+
+```gdscript
+# Keep 10% of player_jump events (sampling).
+Manalens.set_before_send(func(event: Dictionary):
+    if event.get("event") == "player_jump" and randf() >= 0.1:
+        return null  # drop
+    return event)
+
+# Remove personal data from every event (PII scrub).
+Manalens.set_before_send(func(event: Dictionary):
+    event.properties.erase("email")
+    if event.has("traits"):
+        event.traits.erase("email")
+    if event.get("event") == "error" and String(event.properties.get("message", "")).contains("@"):
+        return null  # drop the error
+    return event)
+```
 
 ## How it works
 

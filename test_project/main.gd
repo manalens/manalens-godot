@@ -2,7 +2,7 @@ extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
 ##   --publishable-key=KEY  a project publishable key (required)
-##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, editor_setup, disabled, overflow, optout, corrupt, marker or fixtures
+##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, editor_setup, disabled, overflow, optout, corrupt, marker, fixtures, privacy or before_send
 ##   In a web export, the same arguments come from the page URL (?mode=web_id&endpoint=...&publishable-key=...).
 ##   --run-id=ID          tag for the events (default: random)
 ##
@@ -99,7 +99,7 @@ func _ready() -> void:
 		"corrupt": await _corrupt(run_id, result)
 		"marker": await _marker(run_id, result)
 		"fixtures": await _fixtures(run_id, result)
-		_: _failures.append("unknown mode %s" % mode)
+		_: await _more_modes(mode, result)
 	_finish(result)
 
 
@@ -538,11 +538,11 @@ func _errors(run_id: String, result: Dictionary) -> void:
 	_fresh()
 	var sdk = Manalens
 	sdk.init(_options(String(_args["endpoint"])))
-	sdk.set_before_send(func(props: Dictionary):
-		if String(props.message).contains("secret"):
+	sdk.set_before_send(func(event: Dictionary):
+		if event.get("event") == "error" and String(event.properties.message).contains("secret"):
 			return null
-		props["run_id"] = run_id
-		return props)
+		event.properties["run_id"] = run_id
+		return event)
 	sdk.track("level_start", {"level": 3, "run_id": run_id})
 	sdk.track_error("Save failed for slot 3", {"error_type": "SaveFailed", "severity": "critical", "handled": false, "properties": {"level": 3}})
 	# Same type, numbers differ: same fingerprint within 1 s, so dropped.
@@ -698,6 +698,200 @@ func _fixtures(_run_id: String, result: Dictionary) -> void:
 	_check(second.get_queue_size() == 0, "fixtures: launch 2 did not send its queue")
 	result["anonymous_id"] = second.get_anonymous_id()
 	_fresh()
+
+
+## Modes added after the fixtures. They are here, below _fixtures(), because
+## the fixture stacks hold line numbers of this file.
+func _more_modes(mode: String, result: Dictionary) -> void:
+	match mode:
+		"privacy": await _privacy(result)
+		"before_send": _before_send_mode(result)
+		_: _failures.append("unknown mode %s" % mode)
+
+
+## privacy: set_consent(false) and reset() clear the breadcrumbs and the error
+## limits; captured engine messages are cleaned (paths, URLs, emails, tokens)
+## and track_error() text is not (P-2783). Needs no network. pnpm test:godot
+## runs it after the fixtures.
+func _privacy(result: Dictionary) -> void:
+	_fresh()
+	var sdk = load("res://fixture_sdk.gd").new()
+	add_child(sdk)
+	sdk.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50}))
+	# Consent withdrawn, then given again.
+	sdk.track("secret_level")
+	sdk.track_error("Save failed")
+	sdk.track_error("Save failed")  # the 1-second limit drops it: errors_dropped 1
+	sdk.set_consent(false)
+	sdk.set_consent(true)
+	sdk.track_error("Save failed")
+	var error = _last_named(sdk, "error")
+	_check(error != null and String(error.properties.get("breadcrumbs", "")) == "session_start,game_open", "privacy: breadcrumbs after consent are %s" % [null if error == null else error.properties.get("breadcrumbs")])
+	_check(sdk._errors_dropped == 0, "privacy: errors_dropped kept after the withdrawal")
+	# Reset: the old session reports its dropped errors, then the history is cleared.
+	sdk.track("secret_level")
+	sdk.track_error("Save failed")  # dropped: errors_dropped 1
+	sdk.reset()
+	var ended = _last_named(sdk, "session_end")
+	_check(ended != null and int(ended.properties.get("errors_dropped", 0)) == 1, "privacy: session_end before reset has no errors_dropped 1")
+	sdk.track_error("Save failed")
+	error = _last_named(sdk, "error")
+	_check(error != null and String(error.properties.get("breadcrumbs", "")) == "session_start", "privacy: breadcrumbs after reset are %s" % [null if error == null else error.properties.get("breadcrumbs")])
+	# The cleaning rules (the cases of the Unreal test Manalens.Errors.LogMessageCleaning).
+	var home := ["/Users/anna/", "/Users/anna/Documents/"]
+	var cases := [
+		["Failed to open /Users/anna/Saved/x.sav", "Failed to open ~/Saved/x.sav"],
+		["at \\Users\\anna\\Saved", "at ~\\Saved"],
+		["read /Users/dave/Library/a.ini", "read ~/Library/a.ini"],
+		["read /home/bob/game/log.txt", "read ~/game/log.txt"],
+		["read C:\\Users\\Carol\\AppData\\x.ini", "read ~\\AppData\\x.ini"],
+		["read d:/users/Carol/x.ini", "read ~/x.ini"],
+		["GET https://user:pass@api.example.com/v1/items?id=3&sig=abc#frag failed", "GET https://api.example.com/v1/items failed"],
+		["connect wss://u@play.example.com?ticket=1", "connect wss://play.example.com"],
+		["GET https://api.example.com/v1/items", "GET https://api.example.com/v1/items"],
+		["No account for jane.doe+x@mail.example.com.", "No account for [email]."],
+		["Actor@Level failed", "Actor@Level failed"],
+		["api_key=abc123 token=xyz&secret=s3 PASSWORD=hunter2", "api_key=[redacted] token=[redacted]&secret=[redacted] PASSWORD=[redacted]"],
+		["Authorization: Bearer abc.def", "Authorization: [redacted]"],
+		["sent bearer xyz.123 to the server", "sent bearer [redacted] to the server"],
+		["session ABCDEFGHIJKLMNOPQRSTUV_- expired", "session [redacted] expired"],
+		["session ABCDEFGHIJKLMNOPQRSTUVW expired", "session ABCDEFGHIJKLMNOPQRSTUVW expired"],
+		["id 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b", "id [redacted]"],
+		["Invalid call. Nonexistent function 'jump' in base 'Nil'.", "Invalid call. Nonexistent function 'jump' in base 'Nil'."],
+		["password=\"hunter2 two\" and key='a b'", "password=\"[redacted]\" and key='[redacted]'"],
+		["{\"token\": \"abc def\", \"api_key\":\"k1\", \"user\": 3}", "{\"token\": \"[redacted]\", \"api_key\":\"[redacted]\", \"user\": 3}"],
+		["{\"password\": \"p w\", \"secret\": 42}", "{\"password\": \"[redacted]\", \"secret\": [redacted]}"],
+		["token: abc123 password : hunter2", "token: [redacted] password : [redacted]"],
+		["\"Authorization\": \"Bearer abc\"", "\"Authorization\": \"[redacted]\""],
+		["header token: Bearer abc", "header token: [redacted] [redacted]"],
+		["jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln. failed", "jwt [redacted]. failed"],
+		["blob aGVsbG8gd29ybGQgaGVsbG8+d29ybGQ end", "blob [redacted] end"],
+		["blob aGVsbG8gd29ybGQgaGVsbG8vd29ybGQ= end", "blob [redacted] end"],
+		["load res://levels/boss_room_final/arena.tscn failed", "load res://levels/boss_room_final/arena.tscn failed"],
+	]
+	for item in cases:
+		var cleaned: String = sdk._clean_log_message(item[0], home)
+		_check(cleaned == item[1], "privacy: clean(%s) = %s, expected %s" % [item[0], cleaned, item[1]])
+	var real_home := OS.get_environment("HOME") if OS.get_environment("HOME") != "" else OS.get_environment("USERPROFILE")
+	if real_home != "":
+		var real: String = sdk._clean_log_message(real_home.path_join("Saved/a.sav"), sdk._home_dirs())
+		_check(real == "~/Saved/a.sav" or real == "~\\Saved/a.sav", "privacy: the real home folder is kept: %s" % real)
+	# A captured engine error reaches the queue cleaned; track_error() text does not change.
+	push_error("Cannot load /Users/anna/Saved/a.sav for anna@example.com?token=abc")
+	await get_tree().process_frame
+	await get_tree().process_frame
+	error = _last_named(sdk, "error")
+	_check(error != null and error.properties.get("source") == "godot_logger", "privacy: the engine error was not captured")
+	if error != null:
+		_check(String(error.properties.message) == "Cannot load ~/Saved/a.sav for [email]?token=[redacted]", "privacy: the engine message is %s" % error.properties.message)
+	sdk.track_error("Mail support@example.com about /Users/anna/x")
+	error = _last_named(sdk, "error")
+	_check(error != null and String(error.properties.message) == "Mail support@example.com about /Users/anna/x", "privacy: track_error text was changed")
+	result["queued"] = sdk.get_queue_size()
+	sdk._timer.stop()
+	sdk.set_process(false)
+	if sdk._error_logger != null:
+		OS.remove_logger(sdk._error_logger)
+		sdk._error_logger = null
+	sdk._initialized = false
+	sdk.queue_free()
+	_fresh()
+
+
+## before_send: the hook gets every event (track, identify, the automatic
+## events, error), can sample and scrub, and cannot break the envelope
+## (G-2527). Needs no network. pnpm test:godot runs it after the fixtures.
+func _before_send_mode(result: Dictionary) -> void:
+	_fresh()
+	var sdk = load("res://fixture_sdk.gd").new()
+	add_child(sdk)
+	var seen := []
+	var state := {"jumps": 0, "mode": "scrub"}
+	sdk.set_before_send(func(event: Dictionary):
+		seen.append("%s:%s" % [event.type, event.get("event", "")])
+		match state.mode:
+			"break_id":
+				event["message_id"] = "changed"
+				event.properties["level"] = 99
+				return event
+			"break_app":
+				event.context.app.erase("platform")
+				return event
+			"no_anonymous_id":
+				event.erase("anonymous_id")
+				return event
+			"wrong_type":
+				return "nope"
+			"nested":
+				sdk.track("from_the_hook")
+				return event
+		if event.get("event") == "player_jump":
+			state.jumps += 1
+			if state.jumps % 10 != 1:
+				return null  # keep 1 in 10
+		if event.has("properties"):
+			event.properties.erase("email")
+		if event.has("traits"):
+			event.traits.erase("email")
+		if event.get("event") == "error" and String(event.properties.get("message", "")).contains("secret"):
+			return null
+		return event)
+	sdk.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50}))
+	_check(seen.has("track:session_start") and seen.has("track:game_open"), "before_send: automatic events skipped the hook: %s" % [seen])
+	for index in 20:
+		sdk.track("player_jump", {"index": index})
+	var jumps: int = sdk._queue.filter(func(entry): return entry.event.get("event") == "player_jump").size()
+	_check(jumps == 2, "before_send: sampling kept %d of 20 player_jump, expected 2" % jumps)
+	sdk.track("signup", {"email": "ana@example.com", "level": 1})
+	var signup = _last_named(sdk, "signup")
+	_check(signup != null and not signup.properties.has("email") and signup.properties.get("level") == 1, "before_send: signup was not scrubbed: %s" % [signup])
+	sdk.identify("player_42", {"email": "ana@example.com", "plan": "supporter"})
+	var identify = sdk._queue.back().event
+	_check(identify.type == "identify" and not identify.traits.has("email") and identify.traits.get("plan") == "supporter", "before_send: identify traits were not scrubbed: %s" % [identify])
+	# Errors: the limits run first, so a dropped error still counts in them.
+	sdk.track_error("a secret value")
+	sdk.track_error("a secret value")  # the 1-second limit: errors_dropped 1
+	_check(_last_named(sdk, "error") == null, "before_send: the secret error was queued")
+	_check(sdk._errors_dropped == 1, "before_send: errors_dropped is %d, expected 1" % sdk._errors_dropped)
+	sdk.track_error("kept")
+	_check(_last_named(sdk, "error") != null, "before_send: a normal error was dropped")
+	var crumbs: String = String(_last_named(sdk, "error").properties.get("breadcrumbs", ""))
+	_check(crumbs.count("player_jump") == 2, "before_send: dropped events are in the breadcrumbs: %s" % crumbs)
+	# A hook that breaks the envelope: the original event is sent.
+	for mode in ["break_id", "break_app", "no_anonymous_id"]:
+		state.mode = mode
+		var size: int = sdk.get_queue_size()
+		sdk.track("level_start", {"level": 3})
+		var last: Dictionary = sdk._queue.back().event
+		_check(sdk.get_queue_size() == size + 1 and last.get("event") == "level_start" and last.properties.get("level") == 3 and last.message_id != "changed" and last.has("anonymous_id") and last.context.app.has("platform"), "before_send %s: the original event was not sent: %s" % [mode, last])
+	state.mode = "wrong_type"
+	var before: int = sdk.get_queue_size()
+	sdk.track("level_start")
+	_check(sdk.get_queue_size() == before, "before_send: a wrong return type did not drop the event")
+	state.mode = "nested"
+	before = sdk.get_queue_size()
+	sdk.track("level_start")
+	_check(sdk.get_queue_size() == before + 1 and _last_named(sdk, "from_the_hook") == null, "before_send: an event recorded inside the hook was queued")
+	sdk.set_before_send(Callable())
+	sdk.track("after_removal", {"email": "kept@example.com"})
+	_check(_last_named(sdk, "after_removal") != null and _last_named(sdk, "after_removal").properties.has("email"), "before_send: Callable() did not remove the hook")
+	result["queued"] = sdk.get_queue_size()
+	sdk._timer.stop()
+	sdk.set_process(false)
+	if sdk._error_logger != null:
+		OS.remove_logger(sdk._error_logger)
+		sdk._error_logger = null
+	sdk._initialized = false
+	sdk.queue_free()
+	_fresh()
+
+
+func _last_named(sdk, name: String):
+	for index in range(sdk._queue.size() - 1, -1, -1):
+		var event: Dictionary = sdk._queue[index].event
+		if event.get("event", "") == name:
+			return event
+	return null
 
 
 func _fixture_options(endpoint: String, values: Dictionary) -> Dictionary:
