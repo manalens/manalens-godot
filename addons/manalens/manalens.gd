@@ -30,6 +30,12 @@ signal flushed(sent: int, ok: bool)
 ## older than 7 days). `dropped` is the number of events. Network errors and 5xx
 ## responses do not emit it: those events stay queued and are sent later.
 signal send_failed(status: int, dropped: int)
+## The answer to link_steam() (P-2815). `linked` is true when Steam accepted the
+## ticket. `status` is the HTTP status (0 when no request was made or the
+## network failed). `code` is the API error code, such as
+## STEAM_TICKET_INVALID or STEAM_NOT_CONNECTED, or an SDK code: STEAM_TICKET
+## (Steam gave no ticket), NETWORK_ERROR or IDENTITY_CHANGED.
+signal steam_linked(linked: bool, status: int, code: String)
 
 const LIBRARY_NAME := "Manalens Godot SDK"
 const LIBRARY_VERSION := "0.2.0"
@@ -56,6 +62,15 @@ const AUTO_IDENTIFY := ["steam"]
 ## GodotSteam may start Steam after the SDK. Try again on the flush timer this
 ## many times (about one minute with the default flush interval).
 const AUTO_IDENTIFY_TRIES := 6
+## Protected traits (P-2814): only a server with the secret key may set them.
+## The collector drops them from game events, so traits() does not send them.
+const PROTECTED_TRAITS := ["email", "itch_user_id", "stripe_customer_id", "paddle_customer_id"]
+## link_steam(): the identity of the Steam Web API ticket. The server accepts only this one.
+const STEAM_TICKET_IDENTITY := "manalens"
+## link_steam() waits for a 429 Retry-After of at most this many seconds, once.
+const LINK_MAX_RETRY_AFTER_S := 60.0
+## Steam's k_EResultOK in the get_ticket_for_web_api signal.
+const STEAM_RESULT_OK := 1
 ## Project Settings > Manalens (publishable_key, endpoint, auto_init, ...).
 const Settings := preload("res://addons/manalens/settings.gd")
 const SEVERITIES := ["debug", "info", "warning", "error", "critical"]
@@ -95,6 +110,16 @@ var _options := {
 	## storefront = steam, when the GodotSteam addon is present and Steam is
 	## running. Off ("") by default. An identify() call from the game wins.
 	"auto_identify": "",
+	## true: after consent, link the Steam account once per launch (P-2815):
+	## the SDK asks GodotSteam for a Web API ticket with the identity
+	## "manalens" and posts it to <api_endpoint>/v0/link. Needs the GodotSteam
+	## addon and a running Steam client; without them it does nothing. Off by
+	## default. See link_steam().
+	"steam_link": false,
+	## The API URL for link_steam(). Empty: the endpoint with an `events.`
+	## host changed to `api.` (https://events.manalens.dev gives
+	## https://api.manalens.dev); any other endpoint is used as it is.
+	"api_endpoint": "",
 	## true: no events and no persistent ID until set_consent(true).
 	"consent_required": false,
 	"flush_interval_s": 10.0,
@@ -151,6 +176,17 @@ var _backoff_until := 0.0
 var _deferred_identify = null  # [user_id, traits] before consent
 var _game_identified := false  # the game called identify() in this launch
 var _auto_identify_tries := 0  # auto_identify attempts left in this launch
+var _deferred_traits := {}  # traits() before consent, merged
+var _warned_protected_traits := false
+var _steam_link_tries := 0  # steam_link attempts left in this launch
+var _steam_link_done := false  # steam_link: the automatic link ran in this launch
+var _link_in_flight := false  # a ticket request or a link request is running
+var _steam_link_pending = null  # link_steam() before consent: a ticket, or true to ask Steam
+var _steam_ticket_handle := 0  # the GodotSteam ticket that the SDK waits for
+var _link_http: HTTPRequest
+var _link_body := ""
+var _link_attempt := 0
+var _link_anonymous_id := ""  # the anonymous ID of the request: a retry needs the same
 var _http: HTTPRequest
 var _timer: Timer
 var _label_re := RegEx.create_from_string("^[A-Za-z0-9._+\\- ]+$")
@@ -217,6 +253,7 @@ func init(options: Dictionary = {}) -> void:
 		push_warning("Manalens: auto_identify must be \"steam\" or empty; ignored")
 		_options.auto_identify = ""
 	_auto_identify_tries = AUTO_IDENTIFY_TRIES if String(_options.auto_identify) != "" else 0
+	_steam_link_tries = AUTO_IDENTIFY_TRIES if bool(_options.steam_link) else 0
 	_initialized = true
 	_server_quiet = is_server_build() and not bool(_options.track_server_builds)
 	if _server_quiet:
@@ -245,6 +282,10 @@ func init(options: Dictionary = {}) -> void:
 	_http.timeout = 10.0
 	_http.request_completed.connect(_on_request_completed)
 	add_child(_http)
+	_link_http = HTTPRequest.new()
+	_link_http.timeout = 10.0
+	_link_http.request_completed.connect(_on_link_completed)
+	add_child(_link_http)
 	_timer = Timer.new()
 	_timer.wait_time = maxf(float(_options.flush_interval_s), 1.0)
 	_timer.autostart = true
@@ -289,7 +330,7 @@ func track_error(message: String, options: Dictionary = {}) -> void:
 
 
 ## A function that gets each event before it is queued: track events (also
-## error and the automatic events), and identify. It gets a copy of the whole
+## error and the automatic events), identify and traits. It gets a copy of the whole
 ## event Dictionary ("type", "event", "properties", "traits", "user_id",
 ## "message_id", "anonymous_id", "session_id", "context", ...). Return the
 ## event to send (changed or not), or null to drop it. The SDK takes "event",
@@ -337,9 +378,220 @@ func _identify(user_id: String, traits: Dictionary, source: String) -> void:
 	flush()
 
 
+## Set traits on this player, with or without a user ID (P-2814). Before
+## identify() the traits belong to this install's anonymous ID; after it, to
+## the user. Values: String, int, float, bool or null (null clears a trait). At
+## most 50 keys and 8 KB of JSON. Like identify(), it waits for consent: calls
+## before consent are merged and sent then. The protected traits email,
+## itch_user_id, stripe_customer_id and paddle_customer_id are not sent (one
+## warning): only a server may set them.
+func traits(values: Dictionary) -> void:
+	if _disabled:
+		return
+	if not _initialized:
+		push_warning("Manalens: call init() first")
+		return
+	var kept := {}
+	var dropped: Array = []
+	for key in values:
+		if PROTECTED_TRAITS.has(String(key)):
+			dropped.append(String(key))
+		else:
+			kept[key] = values[key]
+	if not dropped.is_empty() and not _warned_protected_traits:
+		_warned_protected_traits = true
+		push_warning("Manalens: traits() does not send %s. Only a server with the secret key can set protected traits" % ", ".join(dropped))
+	kept = _fit(_scalars(kept), "traits")
+	if kept.is_empty():
+		if dropped.is_empty():
+			push_warning("Manalens: traits() needs at least one trait")
+		return
+	if not _identity_active:
+		_deferred_traits.merge(kept, true)
+		return
+	_send_traits(kept)
+
+
+func _send_traits(values: Dictionary) -> void:
+	_touch()
+	var event := _build("traits", "", {})
+	event.event["traits"] = values
+	_enqueue(event)
+
+
+## Link the Steam account of this player (P-2815). Manalens checks the ticket
+## with Steam and reads which of your apps the account owns. The player does
+## not sign in. Once per launch, after consent.
+##
+## With no argument the SDK asks GodotSteam for a Web API ticket itself:
+## Steam.getAuthTicketForWebApi("manalens"), then the get_ticket_for_web_api
+## signal. Without the GodotSteam addon or a running Steam client it does
+## nothing. With your own ticket bytes (from GetAuthTicketForWebApi with the
+## identity "manalens"), the SDK sends those. The answer comes in the
+## steam_linked signal. A refused ticket is not sent again; a 429 with
+## Retry-After (60 s or less) is tried once more.
+func link_steam(ticket: PackedByteArray = PackedByteArray()) -> void:
+	if _disabled:
+		return
+	if not _initialized:
+		push_warning("Manalens: call init() first")
+		return
+	if not ticket.is_empty() and (ticket.size() < 16 or ticket.size() > 2048):
+		push_warning("Manalens: link_steam() needs a ticket of 16 to 2048 bytes")
+		return
+	if _link_in_flight:
+		return
+	_steam_link_tries = 0  # A call from the game replaces the steam_link option.
+	if not _identity_active:
+		_steam_link_pending = true if ticket.is_empty() else ticket
+		return
+	if ticket.is_empty():
+		_request_steam_ticket()
+	else:
+		_send_link(ticket.hex_encode())
+
+
+## steam_link = true: once per launch, after consent, when Steam runs. Tried
+## again on the flush timer: the game may start Steam after the SDK.
+func _try_steam_link() -> void:
+	if _steam_link_tries <= 0 or _steam_link_done or not _identity_active or _server_quiet:
+		return
+	_steam_link_tries -= 1
+	if not Engine.has_singleton("Steam"):
+		_steam_link_tries = 0  # No GodotSteam addon: nothing to do.
+		return
+	if _steam_id() == "":
+		return  # Steam is not running yet.
+	_steam_link_tries = 0
+	_request_steam_ticket()
+
+
+func _request_steam_ticket() -> void:
+	if _link_in_flight or not Engine.has_singleton("Steam"):
+		return
+	var steam: Object = Engine.get_singleton("Steam")
+	if steam == null or not steam.has_method("getAuthTicketForWebApi") or not steam.has_signal("get_ticket_for_web_api"):
+		return
+	if steam.has_method("isSteamRunning") and not bool(steam.call("isSteamRunning")):
+		return
+	_steam_link_done = true
+	_link_in_flight = true
+	if not steam.is_connected("get_ticket_for_web_api", _on_steam_ticket):
+		steam.connect("get_ticket_for_web_api", _on_steam_ticket)
+	_steam_ticket_handle = int(steam.call("getAuthTicketForWebApi", STEAM_TICKET_IDENTITY))
+	if _steam_ticket_handle == 0:
+		steam.disconnect("get_ticket_for_web_api", _on_steam_ticket)
+		_link_finished(false, 0, "STEAM_TICKET")
+
+
+## GodotSteam: get_ticket_for_web_api(auth_ticket, result, ticket_size, ticket_buffer).
+func _on_steam_ticket(auth_ticket: int, result: int, ticket_size: int, ticket_buffer: PackedByteArray) -> void:
+	if auth_ticket != _steam_ticket_handle:
+		return  # A ticket that the game asked for itself.
+	_steam_ticket_handle = 0
+	var steam: Object = Engine.get_singleton("Steam") if Engine.has_singleton("Steam") else null
+	if steam != null and steam.is_connected("get_ticket_for_web_api", _on_steam_ticket):
+		steam.disconnect("get_ticket_for_web_api", _on_steam_ticket)
+	var bytes := ticket_buffer.slice(0, ticket_size) if ticket_size > 0 else ticket_buffer
+	if result != STEAM_RESULT_OK or bytes.size() < 16 or bytes.size() > 2048:
+		if _options.debug:
+			print("Manalens: Steam gave no Web API ticket (result %d)" % result)
+		_link_finished(false, 0, "STEAM_TICKET")
+		return
+	_send_link(bytes.hex_encode())
+
+
+func _send_link(ticket_hex: String) -> void:
+	if not _identity_active or _anonymous_id == "":
+		_link_finished(false, 0, "CONSENT_REQUIRED")
+		return
+	_steam_link_done = true
+	_link_in_flight = true
+	_link_attempt = 0
+	_link_anonymous_id = _anonymous_id
+	_link_body = JSON.stringify({"provider": "steam", "ticket": ticket_hex, "anonymous_id": _anonymous_id})
+	_link_request()
+
+
+func _link_request() -> void:
+	var headers := PackedStringArray(["Content-Type: application/json", "x-publishable-key: %s" % _options.publishable_key])
+	_link_send(_link_url(), headers, _link_body)
+
+
+## The HTTP call of link_steam(). Tests replace it.
+func _link_send(url: String, headers: PackedStringArray, body: String) -> void:
+	if _link_http == null or _link_http.request(url, headers, HTTPClient.METHOD_POST, body) != OK:
+		_on_link_completed(HTTPRequest.RESULT_CANT_CONNECT, 0, PackedStringArray(), PackedByteArray())
+
+
+## Run `callback` after `seconds`. Tests replace it.
+func _link_after(seconds: float, callback: Callable) -> void:
+	get_tree().create_timer(seconds).timeout.connect(callback)
+
+
+func _link_url() -> String:
+	var base := String(_options.api_endpoint).trim_suffix("/")
+	if base == "":
+		base = String(_options.endpoint).trim_suffix("/")
+		var scheme := base.find("://")
+		if scheme >= 0 and base.substr(scheme + 3).begins_with("events."):
+			base = base.left(scheme + 3) + "api." + base.substr(scheme + 3 + "events.".length())
+	return base + "/v0/link"
+
+
+func _on_link_completed(result: int, code: int, headers: PackedStringArray, body: PackedByteArray) -> void:
+	if result != HTTPRequest.RESULT_SUCCESS:
+		_link_finished(false, 0, "NETWORK_ERROR")
+		return
+	if code >= 200 and code < 300:
+		if _options.debug:
+			print("Manalens: Steam account linked")
+		_link_finished(true, code, "")
+		return
+	var wait := _retry_after_seconds(headers)
+	if code == 429 and _link_attempt == 0 and wait >= 0.0 and wait <= LINK_MAX_RETRY_AFTER_S:
+		_link_attempt = 1
+		_link_after(wait, _link_retry)
+		return
+	var error_code := ""
+	var parsed = JSON.parse_string(body.get_string_from_utf8())
+	if typeof(parsed) == TYPE_DICTIONARY and typeof(parsed.get("error")) == TYPE_DICTIONARY:
+		error_code = String(parsed.error.get("code", ""))
+	push_warning("Manalens: link_steam() failed (HTTP %d%s)" % [code, "" if error_code == "" else " " + error_code])
+	_link_finished(false, code, error_code)
+
+
+func _link_finished(linked: bool, status: int, code: String) -> void:
+	_link_in_flight = false
+	steam_linked.emit(linked, status, code)
+
+
+## The one retry after a 429. Only with the same gates as the first send: after
+## set_consent(false), an opt-out or reset() the old ticket and ID are not sent.
+func _link_retry() -> void:
+	if _disabled or not _identity_active or not _identity_allowed():
+		_link_finished(false, 0, "CONSENT_REQUIRED")
+		return
+	if _anonymous_id != _link_anonymous_id:
+		_link_finished(false, 0, "IDENTITY_CHANGED")
+		return
+	_link_request()
+
+
+## Retry-After in seconds (a number of seconds or an HTTP date), or -1 without the header.
+func _retry_after_seconds(headers: PackedStringArray) -> float:
+	for header in headers:
+		var colon := String(header).find(":")
+		if colon > 0 and String(header).substr(0, colon).strip_edges().to_lower() == "retry-after":
+			return _parse_retry_after(headers, _now())
+	return -1.0
+
+
 ## Forget the player: ends the session, clears user_id, makes a new anonymous ID
 ## and starts a new session.
 func reset() -> void:
+	_deferred_traits.clear()
+	_steam_link_pending = null
 	if not _identity_active:
 		_user_id = ""
 		_deferred_identify = null
@@ -380,6 +632,8 @@ func set_consent(granted: bool) -> void:
 		return
 	_identity_active = false
 	_deferred_identify = null
+	_deferred_traits.clear()
+	_steam_link_pending = null
 	_anonymous_id = ""
 	_user_id = ""
 	_session_id = ""
@@ -589,6 +843,7 @@ func _on_tick() -> void:
 	if _focused and _session_id != "":
 		_touch()
 	_try_auto_identify()
+	_try_steam_link()
 	_save_session()
 	_save_queue()
 	flush()
@@ -651,8 +906,20 @@ func _start_identity() -> void:
 		var pending: Array = _deferred_identify
 		_deferred_identify = null
 		_identify(pending[0], pending[1], "game")
+	if not _deferred_traits.is_empty():
+		var held := _deferred_traits
+		_deferred_traits = {}
+		_send_traits(held)
+	if _steam_link_pending != null:
+		var link = _steam_link_pending
+		_steam_link_pending = null
+		if link is PackedByteArray:
+			_send_link(link.hex_encode())
+		else:
+			_request_steam_ticket()
 	# Next frame: an identify() that the game calls right after init() wins.
 	_try_auto_identify.call_deferred()
+	_try_steam_link.call_deferred()
 	flush()
 
 

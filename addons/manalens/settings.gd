@@ -20,6 +20,7 @@ const ITEMS := [
 	["storefront", TYPE_STRING, "", PROPERTY_HINT_ENUM_SUGGESTION, STOREFRONTS, false],
 	["platform", TYPE_STRING, "", PROPERTY_HINT_ENUM_SUGGESTION, PLATFORMS, false],
 	["auto_identify", TYPE_STRING, "", PROPERTY_HINT_ENUM_SUGGESTION, ",steam", false],
+	["steam_link", TYPE_BOOL, false, PROPERTY_HINT_NONE, "", false],
 	["track_server_builds", TYPE_BOOL, false, PROPERTY_HINT_NONE, "", false],
 ]
 

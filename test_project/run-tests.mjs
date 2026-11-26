@@ -39,6 +39,8 @@ const OFFLINE_MODES = [
   ['server', 'a server build sends no game_open or sessions unless track_server_builds'],
   ['auto_identify', 'auto_identify = steam: one hashed identify per launch, after consent, and the game wins'],
   ['platform', 'the platform option for console builds; console storefronts'],
+  ['traits', 'traits(): anonymous and user traits, protected traits not sent, consent'],
+  ['steam_link', 'link_steam() and steam_link: ticket, body, no retry of a refusal, one retry after a 429, consent and reset() during the wait'],
 ];
 
 function run(mode, endpoint) {

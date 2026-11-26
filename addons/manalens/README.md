@@ -33,6 +33,8 @@ func _on_signed_in(player_id: String) -> void:
 | `init(options)` | Starts the SDK. Sends `session_start` and `game_open` (`is_first_open`, `first_open_at`). |
 | `track(event, properties)` | Records an event. Property values are String, int, float, bool or null; other values are dropped. |
 | `identify(user_id, traits)` | Attaches a player ID (kept on disk) and traits. |
+| `traits(traits)` | Sets traits on this player, with or without a player ID. See [Traits](#traits). |
+| `link_steam(ticket)` | Verifies the Steam account of this player. See [Verify Steam ownership](#verify-steam-ownership). |
 | `link_url(url)` | Adds the handoff parameter (`mana_hid`) to a website URL, so the website joins this player without `identify()`. Use it with `OS.shell_open()`. Unchanged before consent. |
 | `reset()` | Ends the session, forgets the player ID, makes a new anonymous ID and starts a new session. |
 | `set_consent(granted)` | Consent mode. `true` starts tracking; `false` deletes the ID, the session and the queue. |
@@ -41,7 +43,7 @@ func _on_signed_in(player_id: String) -> void:
 | `flush()` | Sends queued events now. |
 | `await shutdown()` | Sends `session_end` and flushes, for at most `quit_timeout_s`. |
 
-Options: `enabled` (true; editor runs send events like a live game, and dev and live data go to the same project: to tell test builds apart, set `build` (for example `"dev"`) and filter by it), `publishable_key` and `endpoint` (required), `app_version`, `build`, `storefront`, `platform` (empty: detected; set `ps5`, `xbox_series`, `xbox_one`, `switch`, or `switch2` in a console port), `auto_identify` (empty; `"steam"` identifies the player by a salted hash of the Steam ID, see below), `consent_required` (false), `flush_interval_s` (10), `flush_at` (20, also the batch size), `max_queue` (1000), `handle_quit` (true), `quit_timeout_s` (2), `capture_engine_errors` (true, Godot 4.5+), `capture_warnings` (false), `max_auto_errors_per_session` (50), `track_server_builds` (false: a dedicated server or `--headless` build sends no `game_open`, sessions or `app_unclean_exit`), `debug` (false).
+Options: `enabled` (true; editor runs send events like a live game, and dev and live data go to the same project: to tell test builds apart, set `build` (for example `"dev"`) and filter by it), `publishable_key` and `endpoint` (required), `app_version`, `build`, `storefront`, `platform` (empty: detected; set `ps5`, `xbox_series`, `xbox_one`, `switch`, or `switch2` in a console port), `auto_identify` (empty; `"steam"` identifies the player by a salted hash of the Steam ID, see below), `steam_link` (false; `true` verifies the Steam account once per launch, see below), `api_endpoint` (empty: the `endpoint` with `events.` changed to `api.`; the URL of `link_steam()`), `consent_required` (false), `flush_interval_s` (10), `flush_at` (20, also the batch size), `max_queue` (1000), `handle_quit` (true), `quit_timeout_s` (2), `capture_engine_errors` (true, Godot 4.5+), `capture_warnings` (false), `max_auto_errors_per_session` (50), `track_server_builds` (false: a dedicated server or `--headless` build sends no `game_open`, sessions or `app_unclean_exit`), `debug` (false).
 
 ## before_send
 
@@ -88,6 +90,37 @@ itch.io serves HTML5 builds from `html.itch.zone` and `html-classic.itch.zone`. 
 ## Test
 
 `test_project` in the [manalens-godot](https://github.com/manalens/manalens-godot) repo is a headless test project (the addon folder is a symlink). [CONTRIBUTING.md](https://github.com/manalens/manalens-godot/blob/main/CONTRIBUTING.md) says how to run the tests and make a release.
+
+## Traits
+
+`traits()` sets traits on this player. It needs no player ID: before `identify()`, the traits belong to this install's anonymous ID; after it, to the player. A `null` value clears a trait.
+
+```gdscript
+Manalens.traits({"level": 3, "difficulty": "hard", "discord_id": "123456789012345678"})
+```
+
+- Values are String, int, float, bool or null. At most 50 keys and 8 KB of JSON.
+- The protected traits `email`, `itch_user_id`, `stripe_customer_id` and `paddle_customer_id` are not sent (one warning). Only a server with the secret key can set them.
+- Like `identify()`, it waits for consent. Calls before consent are merged and sent then.
+
+## Verify Steam ownership
+
+`link_steam()` links the Steam account that runs the game to this install. Manalens checks a Steam ticket with Steam and reads which of your apps the account owns. The player does not sign in. See [Steam ownership](https://docs.manalens.dev/features/steam-ownership) and the [Link API](https://docs.manalens.dev/api/link).
+
+With [GodotSteam](https://godotsteam.com), set `"steam_link": true` (or **Project Settings > Manalens > Steam Link** under Advanced Settings), or call `link_steam()` with no argument. After consent, once per launch, the SDK calls `Steam.getAuthTicketForWebApi("manalens")`, waits for the `get_ticket_for_web_api` signal, and posts the ticket to `<api_endpoint>/v0/link`. Without GodotSteam, or with Steam closed, it does nothing.
+
+With your own Steam code, make a ticket with the identity `manalens` and pass its bytes:
+
+```gdscript
+Manalens.steam_linked.connect(func(linked: bool, status: int, code: String):
+    if not linked:
+        print("Steam link failed: ", status, " ", code))
+Manalens.link_steam(ticket_bytes)
+```
+
+- The `steam_linked(linked, status, code)` signal gives the answer. `code` is the API error code (for example `STEAM_TICKET_INVALID` or `STEAM_NOT_CONNECTED`), or `STEAM_TICKET`, `NETWORK_ERROR`, `CONSENT_REQUIRED` or `IDENTITY_CHANGED`.
+- A refused ticket is not sent again. After a `429` with `Retry-After` (60 s or less), the SDK tries once more, but not after `set_consent(false)` or `reset()` during the wait.
+- Say in your privacy notice that your game sends a Steam ticket to Manalens to confirm ownership.
 
 ## Identify players by Steam ID (opt-in)
 

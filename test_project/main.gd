@@ -2,7 +2,7 @@ extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
 ##   --publishable-key=KEY  a project publishable key (required)
-##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, editor_setup, disabled, overflow, optout, corrupt, marker, fixtures, privacy, before_send or server
+##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, editor_setup, disabled, overflow, optout, corrupt, marker, fixtures, privacy, before_send, server, auto_identify, platform, traits or steam_link
 ##   In a web export, the same arguments come from the page URL (?mode=web_id&endpoint=...&publishable-key=...).
 ##   --run-id=ID          tag for the events (default: random)
 ##
@@ -667,6 +667,7 @@ func _fixtures(_run_id: String, result: Dictionary) -> void:
 		"flow": "source", "currency": "gold", "amount": 25, "ratio": 0.75, "float": 0.1,
 		"big": 9000000000, "price": 4.99, "boss": false, "note": null, "text": "quote \" slash \\ line\nend",
 	})
+	first.traits({"difficulty": "hard", "level": 3})
 	first.identify("player_42", {"plan": "supporter", "level": 12, "vip": true})
 	first.track_error("Save failed for slot 3", {"severity": "critical", "error_type": "SaveFailed", "handled": false, "properties": {"slot": 3}})
 	first.clock += 5.0
@@ -709,6 +710,8 @@ func _more_modes(mode: String, result: Dictionary) -> void:
 		"server": _server_mode(result)
 		"auto_identify": await _auto_identify_mode(result)
 		"platform": _platform_mode(result)
+		"traits": await _traits_mode(result)
+		"steam_link": await _steam_link_mode(result)
 		_: _failures.append("unknown mode %s" % mode)
 
 
@@ -1167,3 +1170,223 @@ func _finish(result: Dictionary) -> void:
 	if OS.has_feature("web"):
 		return  # A page stays open; the script reloads or closes it.
 	get_tree().quit(0 if result.ok else 1)
+
+
+func _traits_of(sdk) -> Array:
+	var out := []
+	for item in sdk._queue:
+		if String(item.event.get("type", "")) == "traits":
+			out.append(item.event)
+	return out
+
+
+## traits: a traits event with the anonymous ID and no user ID; the user ID
+## after identify(); protected traits are not sent; it waits for consent
+## (P-2814). Needs no network.
+func _traits_mode(result: Dictionary) -> void:
+	_fresh()
+	var sdk = await _auto_sdk({"flush_at": 50})
+	sdk.traits({"level": 3, "difficulty": "hard", "note": null})
+	var sent := _traits_of(sdk)
+	result["traits"] = sent
+	_check(sent.size() == 1, "traits: expected one traits event: %s" % [sent])
+	if sent.size() == 1:
+		var event: Dictionary = sent[0]
+		_check(event.traits == {"level": 3, "difficulty": "hard", "note": null}, "traits: wrong traits %s" % [event.traits])
+		_check(not event.has("event") and not event.has("user_id"), "traits: an event name or a user ID: %s" % [event])
+		_check(event.anonymous_id == sdk.get_anonymous_id() and event.session_id != "" and event.channel == "app", "traits: wrong identity: %s" % [event])
+	sdk.traits({"email": "ana@example.com", "itch_user_id": "9", "plan": "pro"})
+	sdk.traits({"stripe_customer_id": "cus_1"})
+	sent = _traits_of(sdk)
+	_check(sent.size() == 2 and sent[1].traits == {"plan": "pro"}, "traits: protected traits were sent: %s" % [sent])
+	_check(sdk._warned_protected_traits, "traits: no warning for protected traits")
+	_check(not JSON.stringify(sdk._queue).contains("ana@example.com"), "traits: the email is in the queue")
+	sdk.traits({})
+	_check(_traits_of(sdk).size() == 2, "traits: an empty call was queued")
+	sdk.identify("player-7")
+	sdk.traits({"level": 4})
+	sent = _traits_of(sdk)
+	_check(sent.size() == 3 and sent[2].get("user_id", "") == "player-7", "traits: no user ID after identify(): %s" % [sent])
+	_stop(sdk)
+	sdk.queue_free()
+
+	# Consent: held and merged before consent, sent once after; forgotten after set_consent(false).
+	_fresh()
+	var consent = await _auto_sdk({"flush_at": 50, "consent_required": true})
+	consent.traits({"level": 1, "mode": "easy"})
+	consent.traits({"level": 2})
+	_check(consent._queue.is_empty(), "traits: queued before consent")
+	consent.set_consent(true)
+	sent = _traits_of(consent)
+	_check(sent.size() == 1 and sent[0].traits == {"level": 2, "mode": "easy"}, "traits: held traits not sent once after consent: %s" % [sent])
+	consent.set_consent(false)
+	consent.traits({"level": 3})
+	consent.reset()
+	consent.set_consent(true)
+	_check(_traits_of(consent).is_empty(), "traits: traits from before reset() were sent: %s" % [_traits_of(consent)])
+	_stop(consent)
+	consent.queue_free()
+	_fresh()
+
+
+func _link_sdk(values: Dictionary):
+	var sdk = load("res://link_sdk.gd").new()
+	add_child(sdk)
+	sdk.init(_fixture_options(OFFLINE_ENDPOINT, values))
+	await get_tree().process_frame
+	await get_tree().process_frame
+	return sdk
+
+
+func _limited(seconds: String) -> Array:
+	return [HTTPRequest.RESULT_SUCCESS, 429, PackedStringArray(["Retry-After: " + seconds]), "{\"error\":{\"code\":\"RATE_LIMITED\"}}"]
+
+
+## steam_link: link_steam() and the steam_link option with a stand-in
+## GodotSteam and a mocked HTTP layer (P-2815): the ticket identity, the body
+## and the URL; once per launch; consent; no retry of a refusal; one retry
+## after a 429 with Retry-After, and none when consent or the identity changed
+## during the wait. Needs no network.
+func _steam_link_mode(result: Dictionary) -> void:
+	var ticket_hex := "140000000a0b0c0d0e0f1011121314151617181900".left(40)
+	var on := {"flush_at": 50, "steam_link": true}
+
+	# 1. No GodotSteam addon: nothing happens and nothing fails.
+	_fresh()
+	var plain = await _link_sdk(on)
+	plain.link_steam()
+	_check(plain.link_requests.is_empty() and plain.linked.is_empty(), "steam_link: a request without Steam")
+	_stop(plain)
+	plain.queue_free()
+
+	var steam = load("res://fake_steam.gd").new()
+	steam.steam_id = 76561197960287930
+	Engine.register_singleton("Steam", steam)
+
+	# 2. Off by default: no request.
+	_fresh()
+	var off = await _link_sdk({"flush_at": 50})
+	off._on_tick()
+	_check(off.link_requests.is_empty() and steam.identities.is_empty(), "steam_link: a request with the option off")
+	_stop(off)
+	off.queue_free()
+
+	# 3. On: one ticket for "manalens", one request with the hex ticket and the anonymous ID.
+	_fresh()
+	var sdk = await _link_sdk(on)
+	await get_tree().process_frame
+	result["requests"] = sdk.link_requests
+	_check(steam.identities == ["manalens"], "steam_link: wrong ticket identity %s" % [steam.identities])
+	_check(sdk.link_requests.size() == 1, "steam_link: expected one request: %s" % [sdk.link_requests])
+	if sdk.link_requests.size() == 1:
+		var request: Dictionary = sdk.link_requests[0]
+		_check(request.url == OFFLINE_ENDPOINT + "/v0/link", "steam_link: wrong URL %s" % request.url)
+		_check(request.body == {"provider": "steam", "ticket": ticket_hex, "anonymous_id": sdk.get_anonymous_id()}, "steam_link: wrong body %s" % [request.body])
+		_check(request.headers.has("x-publishable-key: mana_pk_fixture"), "steam_link: no publishable key header")
+	_check(sdk.linked == [[true, 200, ""]], "steam_link: wrong signal %s" % [sdk.linked])
+	sdk._on_tick()
+	await get_tree().process_frame
+	_check(sdk.link_requests.size() == 1 and steam.identities.size() == 1, "steam_link: linked twice in one launch")
+	_check(not JSON.stringify(sdk._queue).contains("76561197960287930"), "steam_link: the SteamID64 is in the queue")
+	_stop(sdk)
+	sdk.queue_free()
+
+	# 4. The URL: events. becomes api.; api_endpoint wins.
+	_fresh()
+	var urls = await _link_sdk({"flush_at": 50})
+	urls._options.endpoint = "https://events.manalens.dev/"
+	_check(urls._link_url() == "https://api.manalens.dev/v0/link", "steam_link: wrong API URL %s" % urls._link_url())
+	urls._options.api_endpoint = "https://example.com/mana/"
+	_check(urls._link_url() == "https://example.com/mana/v0/link", "steam_link: api_endpoint ignored: %s" % urls._link_url())
+	_stop(urls)
+	urls.queue_free()
+
+	# 5. Consent: nothing before set_consent(true), then one link.
+	_fresh()
+	steam.identities.clear()
+	var with_consent := on.duplicate()
+	with_consent["consent_required"] = true
+	var consent = await _link_sdk(with_consent)
+	consent._on_tick()
+	consent.link_steam()
+	_check(consent.link_requests.is_empty() and steam.identities.is_empty(), "steam_link: a request before consent")
+	consent.set_consent(true)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	_check(consent.link_requests.size() == 1, "steam_link: no request after consent: %s" % [consent.link_requests])
+	_stop(consent)
+	consent.queue_free()
+
+	# 6. Steam gives no ticket: no request, the signal says STEAM_TICKET.
+	_fresh()
+	steam.ticket_result = 2
+	var failed = await _link_sdk(on)
+	await get_tree().process_frame
+	_check(failed.link_requests.is_empty() and failed.linked == [[false, 0, "STEAM_TICKET"]], "steam_link: a failed ticket: %s, %s" % [failed.link_requests, failed.linked])
+	steam.ticket_result = 1
+	_stop(failed)
+	failed.queue_free()
+
+	# 7. The game's own ticket; a 4xx or 5xx is not sent again; a network error returns.
+	_fresh()
+	var manual = await _link_sdk({"flush_at": 50})
+	var bytes := ticket_hex.hex_decode()
+	for answer in [[400, "STEAM_TICKET_INVALID"], [401, "UNAUTHORIZED"], [403, "FORBIDDEN"], [409, "STEAM_NOT_CONNECTED"], [502, "STEAM_UNAVAILABLE"], [503, "NOT_CONFIGURED"]]:
+		manual.link_requests.clear()
+		manual.linked.clear()
+		manual.link_responses.append([HTTPRequest.RESULT_SUCCESS, answer[0], PackedStringArray(), "{\"error\":{\"code\":\"%s\"}}" % answer[1]])
+		manual.link_steam(bytes)
+		_check(manual.link_requests.size() == 1 and manual.waits.is_empty(), "steam_link: HTTP %d was sent again" % answer[0])
+		_check(manual.linked == [[false, answer[0], answer[1]]], "steam_link: wrong signal for %d: %s" % [answer[0], manual.linked])
+	manual.link_requests.clear()
+	manual.linked.clear()
+	manual.link_responses.append([HTTPRequest.RESULT_CANT_CONNECT, 0, PackedStringArray(), ""])
+	manual.link_steam(bytes)
+	_check(manual.link_requests.size() == 1 and manual.linked == [[false, 0, "NETWORK_ERROR"]], "steam_link: network error: %s" % [manual.linked])
+	manual.link_steam(PackedByteArray([1, 2, 3]))
+	_check(manual.link_requests.size() == 1, "steam_link: a short ticket was sent")
+
+	# 8. A 429 with Retry-After: one more try after the wait, then no loop; over 60 s: no wait.
+	manual.link_requests.clear()
+	manual.linked.clear()
+	manual.link_responses.append_array([_limited("2"), _limited("2")])
+	manual.link_steam(bytes)
+	_check(manual.waits.size() == 1 and float(manual.waits[0][0]) == 2.0, "steam_link: no Retry-After wait: %s" % [manual.waits])
+	manual.link_steam(bytes)  # in flight: ignored
+	_check(manual.link_requests.size() == 1, "steam_link: a second call while one waits was sent")
+	if manual.waits.size() == 1:
+		manual.waits.pop_front()[1].call()
+	_check(manual.link_requests.size() == 2 and manual.waits.is_empty(), "steam_link: not one retry: %d requests" % manual.link_requests.size())
+	_check(manual.linked == [[false, 429, "RATE_LIMITED"]], "steam_link: wrong 429 signal %s" % [manual.linked])
+	manual.link_requests.clear()
+	manual.linked.clear()
+	manual.link_responses.append(_limited("120"))
+	manual.link_steam(bytes)
+	_check(manual.link_requests.size() == 1 and manual.waits.is_empty(), "steam_link: waited for a Retry-After over 60 s")
+
+	# 9. Consent withdrawn during the wait: no second request.
+	manual.link_requests.clear()
+	manual.linked.clear()
+	manual.link_responses.append(_limited("2"))
+	manual.link_steam(bytes)
+	manual.set_consent(false)
+	if manual.waits.size() == 1:
+		manual.waits.pop_front()[1].call()
+	_check(manual.link_requests.size() == 1 and manual.linked == [[false, 0, "CONSENT_REQUIRED"]], "steam_link: sent after set_consent(false): %s" % [manual.linked])
+	manual.set_consent(true)
+
+	# 10. reset() during the wait: no second request with the old ID.
+	manual.link_requests.clear()
+	manual.linked.clear()
+	manual.link_responses.append(_limited("2"))
+	manual.link_steam(bytes)
+	manual.reset()
+	if manual.waits.size() == 1:
+		manual.waits.pop_front()[1].call()
+	_check(manual.link_requests.size() == 1 and manual.linked == [[false, 0, "IDENTITY_CHANGED"]], "steam_link: sent after reset(): %s" % [manual.linked])
+	_stop(manual)
+	manual.queue_free()
+
+	Engine.unregister_singleton("Steam")
+	steam.free()
+	_fresh()
