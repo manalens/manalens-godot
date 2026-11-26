@@ -4,3 +4,4 @@
 /.gitignore export-ignore
 /icon.png export-ignore
 /.github export-ignore
+/CONTRIBUTING.md export-ignore
