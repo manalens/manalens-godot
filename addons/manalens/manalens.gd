@@ -46,6 +46,8 @@ const SESSION_MAX_AGE_S := 24.0 * 60.0 * 60.0
 const MAX_EVENT_AGE_S := 7.0 * 24.0 * 3600.0 - 3600.0
 const MAX_BACKOFF_S := 300.0
 const STOREFRONTS := ["steam", "itch", "epic", "gog", "app_store", "play", "other"]
+## Project Settings > Manalens (publishable_key, endpoint, auto_init, ...).
+const Settings := preload("res://addons/manalens/settings.gd")
 const SEVERITIES := ["debug", "info", "warning", "error", "critical"]
 const ERROR_LOGGER_PATH := "res://addons/manalens/error_logger.gd"
 ## Error limits (as Sentry Godot): the same fingerprint at most once a second,
@@ -140,11 +142,17 @@ var _quoted_re := RegEx.create_from_string("\"[^\"]*\"|'[^']*'")
 ## Start the SDK. Keys: publishable_key, endpoint (required); enabled, app_version, build,
 ## storefront, consent_required, flush_interval_s, flush_at, max_queue,
 ## handle_quit, quit_timeout_s, capture_engine_errors, capture_warnings,
-## max_auto_errors_per_session, debug.
-func init(options: Dictionary) -> void:
+## max_auto_errors_per_session, debug. The values of Project Settings >
+## Manalens apply first; the options override them. With a key in Project
+## Settings and auto_init on, the autoload calls init({}) itself at the end of
+## the first frame, unless your code called init() before.
+func init(options: Dictionary = {}) -> void:
 	if _initialized:
 		push_warning("Manalens: init() was already called")
 		return
+	var from_settings: Dictionary = Settings.options()
+	for key in from_settings:
+		_options[key] = from_settings[key]
 	for key in options:
 		if _options.has(key):
 			_options[key] = options[key]
@@ -452,6 +460,21 @@ func _exit_tree() -> void:
 
 func _ready() -> void:
 	set_process(false)
+	if not Engine.is_editor_hint():
+		_auto_init.call_deferred()
+
+
+## Project Settings > Manalens: start the SDK when a key is set and auto_init
+## is on. Runs after the _ready() of the first scene, so a game that calls
+## init() there keeps its own options.
+func _auto_init() -> void:
+	if _initialized or not bool(Settings.get_value("auto_init")):
+		return
+	if String(Settings.get_value("publishable_key")).strip_edges() == "":
+		return
+	if _options.debug:
+		print("Manalens: starting from Project Settings")
+	init()
 
 
 ## Send the errors that the engine logger collected (main thread).

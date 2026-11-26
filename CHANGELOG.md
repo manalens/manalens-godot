@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Setup without code (G-2532): **Project > Project Settings > Manalens > General** (publishable_key, endpoint, auto_init, consent_required; app_version, build and storefront under Advanced Settings). With a key and auto_init on, the autoload starts the SDK at the end of the first frame. `init()` called earlier wins, and its options override the settings.
+- A **Manalens** dock: the key check (`mana_pk_`, never a secret or API key), **Send test event** (one `manalens_test_event` with build `editor`, straight to the collector, no install and no session) with the result and the collector's reason, and a link to the app.
+- `init()` takes no argument to use only the Project Settings values.
+
 ## 0.1.2 (2026-11-26)
 
 - Fixed: a focus event after `shutdown()` started a new, empty session. Now a focus event keeps only an open session alive; the next event starts a new one. Same rule as the flush timer in 0.1.1. Found in the `with-unity` example with 0.1.1.

@@ -2,7 +2,7 @@ extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
 ##   --publishable-key=KEY  a project publishable key (required)
-##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, disabled, overflow, optout, corrupt, marker or fixtures
+##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, editor_setup, disabled, overflow, optout, corrupt, marker or fixtures
 ##   In a web export, the same arguments come from the page URL (?mode=web_id&endpoint=...&publishable-key=...).
 ##   --run-id=ID          tag for the events (default: random)
 ##
@@ -36,6 +36,12 @@ extends Node
 ## shutdown_tick: shutdown() waits for a send that never ends while the tick
 ##           timer fires and the window gets focus. No new session starts
 ##           after session_end. Needs no network.
+##
+## editor_setup: Project Settings > Manalens (G-2532). With a key and auto_init
+##           the SDK starts by itself at the end of the frame; init() options
+##           override the settings; auto_init off starts nothing; the dock's
+##           key check; the dock's test event reaches the collector (HTTP 202)
+##           when --endpoint is a real collector.
 ##
 ## web_id, web_optout, web_after_optout, web_legacy: web export only
 ##           (scripts/test-godot-web.mjs, P-2791). web_id starts the SDK and
@@ -82,6 +88,7 @@ func _ready() -> void:
 		"web_reload": await _web_reload(run_id, result)
 		"install_kill": _install_kill(result)
 		"shutdown_tick": await _shutdown_tick(result)
+		"editor_setup": await _editor_setup(result)
 		"web_id": _web_id(result)
 		"web_optout": _web_optout(result)
 		"web_after_optout": _web_after_optout(result)
@@ -347,6 +354,78 @@ func _shutdown_tick(result: Dictionary) -> void:
 	_stop(sdk)
 	sdk.queue_free()
 	_fresh()
+
+
+func _editor_setup(result: Dictionary) -> void:
+	const Settings := preload("res://addons/manalens/settings.gd")
+	const TestEvent := preload("res://addons/manalens/test_event.gd")
+	var key := String(_args["publishable-key"])
+	var endpoint := String(_args["endpoint"])
+	var path := Settings.PREFIX
+	# Key check of the dock.
+	_check(Settings.key_problem("") != "", "an empty key passed")
+	_check(Settings.key_problem("mana_sk_" + "a".repeat(51)).contains("secret"), "a secret key passed")
+	_check(Settings.key_problem("mana_api_x").contains("API key"), "an API key passed")
+	_check(Settings.key_problem("pk_live_x").contains("mana_pk_"), "a key without mana_pk_ passed")
+	_check(Settings.key_problem("mana_pk_short").contains("length"), "a short key passed")
+	_check(Settings.key_problem("mana_pk_" + "A".repeat(51)) == "", "a well-formed key failed")
+	# Auto start from the settings.
+	_fresh()
+	ProjectSettings.set_setting(path + "publishable_key", "mana_pk_" + "A".repeat(51))
+	ProjectSettings.set_setting(path + "endpoint", OFFLINE_ENDPOINT)
+	ProjectSettings.set_setting(path + "build", "from-settings")
+	ProjectSettings.set_setting(path + "storefront", "itch")
+	var auto = load("res://fixture_sdk.gd").new()
+	add_child(auto)
+	_check(not auto._initialized, "the SDK started before the end of the frame")
+	await get_tree().process_frame
+	await get_tree().process_frame
+	result["auto_started"] = auto._initialized
+	_check(auto._initialized and auto._identity_active, "no automatic start with a key in Project Settings")
+	_check(String(auto._options.build) == "from-settings" and String(auto._options.storefront) == "itch", "the settings were not used: %s" % [auto._options])
+	_stop(auto)
+	auto.queue_free()
+	# init() before the end of the frame: its options win over the settings.
+	_fresh()
+	var own = load("res://fixture_sdk.gd").new()
+	add_child(own)
+	own.init({"build": "from-code"})
+	await get_tree().process_frame
+	await get_tree().process_frame
+	_check(String(own._options.build) == "from-code", "init() options did not override the settings")
+	_check(String(own._options.storefront) == "itch", "init() lost the storefront of the settings")
+	_stop(own)
+	own.queue_free()
+	# auto_init off: nothing starts.
+	_fresh()
+	ProjectSettings.set_setting(path + "auto_init", false)
+	var off = load("res://fixture_sdk.gd").new()
+	add_child(off)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	_check(not off._initialized, "the SDK started with auto_init off")
+	off.queue_free()
+	for item in Settings.ITEMS:
+		ProjectSettings.set_setting(path + item[0], null)
+	_fresh()
+	# The dock's test event.
+	var body := TestEvent.body({"app_version": "1.0.0", "storefront": "itch"}, TestEvent.uuid(), TestEvent.platform(OS.get_name()), Time.get_unix_time_from_system())
+	var event: Dictionary = JSON.parse_string(body).events[0]
+	_check(event.event == "manalens_test_event" and event.context.app.build == "editor" and event.context.app.engine == "godot", "test event body: %s" % body)
+	if endpoint == OFFLINE_ENDPOINT:
+		return
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request(TestEvent.url(endpoint), TestEvent.headers(key), HTTPClient.METHOD_POST, body)
+	var response: Array = await http.request_completed
+	var line := TestEvent.describe(response[0], response[1], response[3].get_string_from_utf8())
+	result["test_event"] = line
+	_check(response[1] == 202 and line.begins_with("Received"), "test event: %s" % line)
+	http.request(TestEvent.url(endpoint), TestEvent.headers("mana_pk_" + "B".repeat(51)), HTTPClient.METHOD_POST, body)
+	response = await http.request_completed
+	result["test_event_bad_key"] = TestEvent.describe(response[0], response[1], response[3].get_string_from_utf8())
+	_check(response[1] == 401, "a wrong key got HTTP %d" % response[1])
+	http.queue_free()
 
 
 func _stop(sdk) -> void:
