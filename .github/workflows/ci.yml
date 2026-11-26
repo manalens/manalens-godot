@@ -50,7 +50,9 @@ jobs:
       - name: Check the version and the CHANGELOG
         run: |
           VERSION=$(sed -n 's/^version="\(.*\)"$/\1/p' addons/manalens/plugin.cfg)
-          TOP=$(sed -n 's/^## \([^ ]*\).*/\1/p' CHANGELOG.md | head -n 1)
+          # An "## Unreleased" section may sit above the newest version between releases.
+          # release.yml requires the version heading at the top.
+          TOP=$(sed -n 's/^## \([^ ]*\).*/\1/p' CHANGELOG.md | grep -vx Unreleased | head -n 1)
           echo "plugin.cfg: $VERSION, CHANGELOG top heading: $TOP"
           test -n "$VERSION" || { echo "::error::No version= in addons/manalens/plugin.cfg"; exit 1; }
           test "$VERSION" = "$TOP" || { echo "::error::plugin.cfg ($VERSION) and the top CHANGELOG heading ($TOP) differ"; exit 1; }
