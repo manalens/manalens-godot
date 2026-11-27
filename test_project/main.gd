@@ -1662,9 +1662,20 @@ func _hang_mode(result: Dictionary) -> void:
 	off.queue_free()
 	_fresh()
 
+	# A threshold under 1 s is 1 s, over 60 s is 60 s.
+	for pair in [[0.3, 1000], [120.0, 60000], [2.5, 2500]]:
+		var clamped = load("res://fixture_sdk.gd").new()
+		add_child(clamped)
+		clamped.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50, "hang_threshold_seconds": pair[0]}))
+		_check(clamped._hang_threshold_ms == pair[1], "hang: hang_threshold_seconds %s gave %d ms, expected %d" % [pair[0], clamped._hang_threshold_ms, pair[1]])
+		_stop_hangs(clamped)
+		clamped.queue_free()
+		_fresh()
+
 	var sdk = load("res://fixture_sdk.gd").new()
 	add_child(sdk)
-	sdk.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50, "hang_threshold_seconds": 0.3}))
+	sdk._hang_test_threshold_ms = 300  # Tests only: below the 1 s minimum.
+	sdk.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50}))
 	_check(sdk._hang_thread != null, "hang: no watchdog thread")
 	# A long first frame (a load) is not a hang.
 	OS.delay_msec(700)
@@ -1682,8 +1693,10 @@ func _hang_mode(result: Dictionary) -> void:
 	if hangs.size() >= 1:
 		var props: Dictionary = hangs[0].properties
 		result["hang"] = props
-		_check(props.get("severity") == "error" and props.get("handled") == true and props.get("source") == "auto", "hang: severity, handled or source: %s" % props)
+		_check(props.get("severity") == "error" and props.get("handled") == false and props.get("source") == "auto", "hang: severity, handled or source: %s" % props)
 		_check(int(props.get("hang_duration_ms", 0)) >= 900, "hang: hang_duration_ms %s" % props.get("hang_duration_ms"))
+		var text := "The main thread was blocked for %.1f s" % (int(props.get("hang_duration_ms", 0)) / 1000.0)
+		_check(String(props.get("message", "")) == text, "hang: message %s, expected %s" % [props.get("message"), text])
 		_check(not props.has("stack"), "hang: Godot cannot read the main thread stack, but a stack was sent")
 		_check(String(props.get("breadcrumbs", "")).contains("before_hang"), "hang: no breadcrumbs")
 		_check(String(sdk._cfg.get_value("session", "hang_message_id", "")) == String(hangs[0].message_id), "hang: the session state does not keep the hang's message_id")
@@ -1727,6 +1740,25 @@ func _hang_mode(result: Dictionary) -> void:
 	next.queue_free()
 	_fresh()
 
+	# Consent withdrawal: the watchdog keeps no session or breadcrumbs of the old player.
+	var withdrawn = load("res://fixture_sdk.gd").new()
+	add_child(withdrawn)
+	withdrawn._hang_test_threshold_ms = 300
+	withdrawn.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50}))
+	await _frames(15)
+	withdrawn.track("before_withdrawal")
+	await _frames(2)
+	_check(withdrawn._hang_crumbs.contains("before_withdrawal") and withdrawn._hang_session != "", "hang: the watchdog has no breadcrumbs or session before the withdrawal")
+	withdrawn.set_consent(false)
+	_check(withdrawn._hang_crumbs == "" and withdrawn._hang_session == "", "hang: set_consent(false) left breadcrumbs or a session in the watchdog")
+	OS.delay_msec(700)
+	_check(not FileAccess.file_exists("user://manalens_hang.json"), "hang: a hang was saved after set_consent(false)")
+	await _frames(2)
+	_check(_hangs(withdrawn).is_empty(), "hang: an app_hang was queued after set_consent(false)")
+	_stop_hangs(withdrawn)
+	withdrawn.queue_free()
+	_fresh()
+
 
 ## hang_launch: the main thread gets stuck for good; run-tests.mjs kills the
 ## process (as a player kills a frozen game). Never prints MANALENS_RESULT.
@@ -1760,6 +1792,7 @@ func _hang_crash_mode(result: Dictionary) -> void:
 		_check(hang.get("session_id") == crash.get("previous_session_id"), "hang_crash: the hang is not in the old session")
 		_check(hang.properties.get("handled") == false and hang.properties.get("severity") == "error", "hang_crash: handled or severity: %s" % hang.properties)
 		_check(not hang.properties.has("stack") and not hang.properties.has("hang_duration_ms"), "hang_crash: a stack or a duration for a hang that never ended")
+		_check(String(hang.properties.get("message", "")) == "The main thread was blocked for 1.0 s", "hang_crash: message %s" % hang.properties.get("message"))
 		_check(String(hang.properties.get("breadcrumbs", "")).contains("before_hang"), "hang_crash: no breadcrumbs from the stuck launch")
 		_check(hang.context.app.get("build") == "godot-test", "hang_crash: context.app.build %s" % hang.context.app.get("build"))
 	_check(not FileAccess.file_exists("user://manalens_hang.json"), "hang_crash: the saved hang was not removed")

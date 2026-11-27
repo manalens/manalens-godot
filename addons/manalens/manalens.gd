@@ -52,6 +52,9 @@ const HANG_PATH := "user://manalens_hang.json"
 const HANG_WARMUP_FRAMES := 10
 ## The watchdog checks the heartbeat this often (at most).
 const HANG_POLL_MS := 250
+## The smallest and the largest hang_threshold_seconds (0 turns detection off).
+const MIN_HANG_THRESHOLD_S := 1.0
+const MAX_HANG_THRESHOLD_S := 60.0
 ## Written by set_consent(false). While it exists the SDK records nothing,
 ## whatever the config file says (fail closed if that file is lost or damaged).
 const OPTOUT_PATH := "user://manalens_optout"
@@ -160,7 +163,8 @@ var _options := {
 	"capture_crash_stacks": true,
 	## Hang detection (P-2833): a watchdog thread sends an `error` with
 	## `error_type` `app_hang` when one frame takes longer than this many
-	## seconds (the main thread is stuck). 0 turns it off. Not counted while
+	## seconds (the main thread is stuck). 0 turns it off; other values are
+	## clamped to 1 to 60 s. Not counted while
 	## the game is unfocused or paused by the OS, in the first frames after
 	## init(), in a run from the editor with the debugger on, on web, and on a
 	## quiet server build.
@@ -240,6 +244,8 @@ var _hang_stop := false  # under _hang_mutex
 var _hang_beat := 0  # under _hang_mutex: ticks (ms) of the last frame
 var _hang_armed := false  # under _hang_mutex: focused, identity on, warm-up done
 var _hang_threshold_ms := 0  # set before the thread starts
+## Tests only: a threshold in ms below MIN_HANG_THRESHOLD_S, used when > 0.
+var _hang_test_threshold_ms := 0
 var _hang_marker := {}  # under _hang_mutex: the hang of this stuck period, or {}
 var _hang_next_id := ""  # under _hang_mutex: the message_id of the next hang
 var _hang_clock := 0.0  # under _hang_mutex: _now() minus ticks in seconds
@@ -711,6 +717,8 @@ func set_consent(granted: bool) -> void:
 	_hang_mutex.lock()
 	_hang_armed = false
 	_hang_marker = {}
+	_hang_session = ""
+	_hang_crumbs = ""
 	if FileAccess.file_exists(HANG_PATH):
 		DirAccess.remove_absolute(HANG_PATH)
 	_hang_mutex.unlock()
@@ -719,6 +727,9 @@ func set_consent(granted: bool) -> void:
 ## Event names and error counts of the old player must never reach a later error.
 func _clear_error_history() -> void:
 	_breadcrumbs.clear()
+	_hang_mutex.lock()
+	_hang_crumbs = ""
+	_hang_mutex.unlock()
 	_error_seen.clear()
 	_error_times.clear()
 	_errors_dropped = 0
@@ -1651,7 +1662,8 @@ func _start_hang_watch() -> void:
 	var threshold := float(_options.hang_threshold_seconds)
 	if threshold <= 0.0 or _thread_unsafe_for_hangs():
 		return
-	_hang_threshold_ms = maxi(1, int(threshold * 1000.0))
+	threshold = clampf(threshold, MIN_HANG_THRESHOLD_S, MAX_HANG_THRESHOLD_S)
+	_hang_threshold_ms = _hang_test_threshold_ms if _hang_test_threshold_ms > 0 else int(threshold * 1000.0)
 	_hang_frames = 0
 	_hang_mutex.lock()
 	_hang_stop = false
@@ -1706,10 +1718,10 @@ func _hang_frame() -> void:
 
 ## The main thread is back after a hang: send it once, with its duration.
 func _record_recovered_hang(marker: Dictionary, duration_ms: int) -> void:
-	var id := _record_error(_hang_message(marker), {
+	var id := _record_error(_hang_message(duration_ms / 1000.0), {
 		"severity": "error",
 		"error_type": "app_hang",
-		"handled": true,
+		"handled": false,
 		"properties": {"hang_duration_ms": duration_ms},
 	}, SOURCE_AUTO, float(marker.started_at), String(marker.message_id))
 	if id != "" and _session_id != "":
@@ -1749,7 +1761,7 @@ func _send_saved_hang() -> String:
 	var props := {}
 	if String(marker.get("breadcrumbs", "")) != "":
 		props["breadcrumbs"] = String(marker.breadcrumbs).right(MAX_STRING)
-	id = _record_error(_hang_message(marker), {
+	id = _record_error(_hang_message(float(marker.get("threshold_s", 0.0))), {
 		"severity": "error",
 		"error_type": "app_hang",
 		"handled": false,
@@ -1760,8 +1772,10 @@ func _send_saved_hang() -> String:
 	return id
 
 
-func _hang_message(marker: Dictionary) -> String:
-	return "The main thread was stuck for more than %s s" % String.num(float(marker.get("threshold_s", 0.0)), 1)
+## The text of every app_hang (the same as the web SDK): the real duration of a
+## hang that ended, the threshold of a hang that never ended.
+func _hang_message(seconds: float) -> String:
+	return "The main thread was blocked for %.1f s" % seconds
 
 
 ## The watchdog thread. It never calls the SDK or the engine's scene tree.
