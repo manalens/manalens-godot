@@ -39,7 +39,7 @@ signal send_failed(status: int, dropped: int)
 signal steam_linked(linked: bool, status: int, code: String)
 
 const LIBRARY_NAME := "Manalens Godot SDK"
-const LIBRARY_VERSION := "0.5.2"
+const LIBRARY_VERSION := "0.6.0"
 const CONFIG_PATH := "user://manalens.cfg"
 const QUEUE_PATH := "user://manalens_queue.json"
 ## Written by set_consent(false). While it exists the SDK records nothing,
@@ -72,6 +72,10 @@ const STEAM_TICKET_IDENTITY := "manalens"
 const LINK_MAX_RETRY_AFTER_S := 60.0
 ## Steam's k_EResultOK in the get_ticket_for_web_api signal.
 const STEAM_RESULT_OK := 1
+## steam_link waits this long after the first accepted batch of the launch,
+## so the collector has stored the install's events before the link: the
+## server trusts a link only when the install has its own events before it.
+const STEAM_LINK_DELAY_S := 20.0
 ## Project Settings > Manalens (publishable_key, endpoint, auto_init, ...).
 const Settings := preload("res://addons/manalens/settings.gd")
 const SEVERITIES := ["debug", "info", "warning", "error", "critical"]
@@ -116,9 +120,11 @@ var _options := {
 	"auto_identify": "",
 	## true: after consent, link the Steam account once per launch (P-2815):
 	## the SDK asks GodotSteam for a Web API ticket with the identity
-	## "manalens" and posts it to <api_endpoint>/v0/link. Needs the GodotSteam
-	## addon and a running Steam client; without them it does nothing. Off by
-	## default. See link_steam().
+	## "manalens" and posts it to <api_endpoint>/v0/link. It waits until the
+	## first event batch of the launch was accepted, plus 20 seconds, so the
+	## install's events are stored before the link (only then does the link
+	## merge installs). Needs the GodotSteam addon and a running Steam client;
+	## without them it does nothing. Off by default. See link_steam().
 	"steam_link": false,
 	## The API URL for link_steam(). Empty: the endpoint with an `events.`
 	## host changed to `api.` (https://events.manalens.dev gives
@@ -188,6 +194,8 @@ var _deferred_traits := {}  # traits() before consent, merged
 var _warned_protected_traits := false
 var _steam_link_tries := 0  # steam_link attempts left in this launch
 var _steam_link_done := false  # steam_link: the automatic link ran in this launch
+var _first_batch_accepted := false  # a batch got a 2xx in this launch
+var _steam_link_ready := false  # steam_link: STEAM_LINK_DELAY_S passed after the first accepted batch
 var _link_in_flight := false  # a ticket request or a link request is running
 var _steam_link_pending = null  # link_steam() before consent: a ticket, or true to ask Steam
 var _steam_ticket_handle := 0  # the GodotSteam ticket that the SDK waits for
@@ -465,10 +473,11 @@ func link_steam(ticket: PackedByteArray = PackedByteArray()) -> void:
 		_send_link(ticket.hex_encode())
 
 
-## steam_link = true: once per launch, after consent, when Steam runs. Tried
+## steam_link = true: once per launch, after consent, when Steam runs, and
+## STEAM_LINK_DELAY_S after the first accepted batch of the launch. Tried
 ## again on the flush timer: the game may start Steam after the SDK.
 func _try_steam_link() -> void:
-	if _steam_link_tries <= 0 or _steam_link_done or not _identity_active or _server_quiet:
+	if _steam_link_tries <= 0 or _steam_link_done or not _steam_link_ready or not _identity_active or _server_quiet:
 		return
 	_steam_link_tries -= 1
 	if not Engine.has_singleton("Steam"):
@@ -478,6 +487,11 @@ func _try_steam_link() -> void:
 		return  # Steam is not running yet.
 	_steam_link_tries = 0
 	_request_steam_ticket()
+
+
+func _on_steam_link_ready() -> void:
+	_steam_link_ready = true
+	_try_steam_link()
 
 
 func _request_steam_ticket() -> void:
@@ -1387,6 +1401,10 @@ func _on_request_completed(result: int, code: int, headers: PackedStringArray, _
 	var rejected := result == HTTPRequest.RESULT_SUCCESS and code >= 400 and code < 500 and code != 408 and code != 429
 	if ok:
 		_batch_limit = 0
+		if not _first_batch_accepted:
+			_first_batch_accepted = true
+			if _steam_link_tries > 0:
+				_link_after(STEAM_LINK_DELAY_S, _on_steam_link_ready)
 	if ok or rejected:
 		var sent := {}
 		for id in _in_flight:

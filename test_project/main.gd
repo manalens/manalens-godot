@@ -1242,6 +1242,17 @@ func _link_sdk(values: Dictionary):
 	return sdk
 
 
+## The collector accepts a batch (2xx). With steam_link on, the SDK then waits
+## STEAM_LINK_DELAY_S: returns that wait as [seconds, callback], or [].
+func _accept_batch(sdk) -> Array:
+	sdk._on_request_completed(HTTPRequest.RESULT_SUCCESS, 200, PackedStringArray(), "{\"ok\":true}".to_utf8_buffer())
+	for wait in sdk.waits:
+		if float(wait[0]) == sdk.STEAM_LINK_DELAY_S:
+			sdk.waits.erase(wait)
+			return wait
+	return []
+
+
 func _limited(seconds: String) -> Array:
 	return [HTTPRequest.RESULT_SUCCESS, 429, PackedStringArray(["Retry-After: " + seconds]), "{\"error\":{\"code\":\"RATE_LIMITED\"}}"]
 
@@ -1271,13 +1282,29 @@ func _steam_link_mode(result: Dictionary) -> void:
 	_fresh()
 	var off = await _link_sdk({"flush_at": 50})
 	off._on_tick()
+	_check(_accept_batch(off).is_empty(), "steam_link: a wait with the option off")
+	off._on_tick()
 	_check(off.link_requests.is_empty() and steam.identities.is_empty(), "steam_link: a request with the option off")
 	_stop(off)
 	off.queue_free()
 
-	# 3. On: one ticket for "manalens", one request with the hex ticket and the anonymous ID.
+	# 3. On: no link before the first accepted batch of the launch, then a
+	# 20-second wait (the collector stores the events), then one ticket for
+	# "manalens", one request with the hex ticket and the anonymous ID.
 	_fresh()
 	var sdk = await _link_sdk(on)
+	sdk._on_tick()
+	await get_tree().process_frame
+	_check(sdk.link_requests.is_empty() and steam.identities.is_empty(), "steam_link: linked before the first accepted batch")
+	sdk._on_request_completed(HTTPRequest.RESULT_CANT_CONNECT, 0, PackedStringArray(), PackedByteArray())
+	_check(sdk.waits.is_empty(), "steam_link: a failed batch started the wait")
+	var ready := _accept_batch(sdk)
+	_check(ready.size() == 2 and float(ready[0]) == 20.0, "steam_link: no 20 s wait after the first accepted batch: %s" % [ready])
+	sdk._on_tick()
+	_check(sdk.link_requests.is_empty() and steam.identities.is_empty(), "steam_link: linked during the wait")
+	_check(_accept_batch(sdk).is_empty(), "steam_link: a second accepted batch started a second wait")
+	if ready.size() == 2:
+		ready[1].call()
 	await get_tree().process_frame
 	result["requests"] = sdk.link_requests
 	_check(steam.identities == ["manalens"], "steam_link: wrong ticket identity %s" % [steam.identities])
@@ -1317,6 +1344,7 @@ func _steam_link_mode(result: Dictionary) -> void:
 	consent.set_consent(true)
 	await get_tree().process_frame
 	await get_tree().process_frame
+	# link_steam() before consent is the game's own call: it is sent at consent, with no batch wait.
 	_check(consent.link_requests.size() == 1, "steam_link: no request after consent: %s" % [consent.link_requests])
 	_stop(consent)
 	consent.queue_free()
@@ -1325,6 +1353,9 @@ func _steam_link_mode(result: Dictionary) -> void:
 	_fresh()
 	steam.ticket_result = 2
 	var failed = await _link_sdk(on)
+	var failed_ready := _accept_batch(failed)
+	if failed_ready.size() == 2:
+		failed_ready[1].call()
 	await get_tree().process_frame
 	_check(failed.link_requests.is_empty() and failed.linked == [[false, 0, "STEAM_TICKET"]], "steam_link: a failed ticket: %s, %s" % [failed.link_requests, failed.linked])
 	steam.ticket_result = 1
