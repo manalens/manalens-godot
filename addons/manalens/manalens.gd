@@ -39,7 +39,7 @@ signal send_failed(status: int, dropped: int)
 signal steam_linked(linked: bool, status: int, code: String)
 
 const LIBRARY_NAME := "Manalens Godot SDK"
-const LIBRARY_VERSION := "0.5.0"
+const LIBRARY_VERSION := "0.5.1"
 const CONFIG_PATH := "user://manalens.cfg"
 const QUEUE_PATH := "user://manalens_queue.json"
 ## Written by set_consent(false). While it exists the SDK records nothing,
@@ -1643,9 +1643,9 @@ func _parse_crash_log(text: String) -> Dictionary:
 		"crash_source": "godot_log",
 	}
 	for i in script.size():
-		script[i] = _clean_log_message(script[i], homes)
+		script[i] = _clean_stack_frame(script[i], homes)
 	for i in cpp.size():
-		cpp[i] = _clean_log_message(cpp[i], homes)
+		cpp[i] = _clean_stack_frame(cpp[i], homes)
 	var frames: Array = script + cpp
 	if frames.is_empty():
 		return result
@@ -1688,6 +1688,19 @@ func _home_dirs() -> Array:
 ## token=, secret=, password=, authorization: and bearer, and runs of 24 or
 ## more letters, digits, _ and - become [redacted]. track_error() text is not
 ## changed.
+## Cleans one crash stack frame: home folders, URLs, and emails, as
+## _clean_log_message, but long names stay (a C++ symbol such as
+## SDL_GetPerformanceFrequency is code, not a token, and the fingerprint
+## needs it).
+func _clean_stack_frame(frame: String, home_dirs: Array) -> String:
+	var text := frame
+	for dir in home_dirs:
+		text = _clean_dir(text, String(dir))
+	text = _clean_home_patterns(text)
+	text = _clean_urls(text)
+	return _clean_emails(text)
+
+
 func _clean_log_message(message: String, home_dirs: Array) -> String:
 	var text := message
 	for dir in home_dirs:

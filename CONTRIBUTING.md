@@ -10,7 +10,7 @@ You need Godot 4.5 or later and Node 20 or later.
 GODOT=/path/to/godot node test_project/run-tests.mjs
 ```
 
-This runs the shared fixture scenario against a capture server on 127.0.0.1, and the modes that need no network. CI (`.github/workflows/ci.yml`) runs the same file with a pinned Godot build on each pull request.
+This runs the shared fixture scenario against a capture server on 127.0.0.1, and the modes that need no network. The last step crashes the test project on purpose (`OS.crash()`) and checks the crash stack at the next launch. On a desktop where the OS shows a crash dialog, set `SKIP_CRASH_TEST=1` to leave it out; CI always runs it. CI (`.github/workflows/ci.yml`) runs the same file with a pinned Godot build on each pull request.
 
 If you change a request body on purpose, write the fixtures again and review the diff:
 

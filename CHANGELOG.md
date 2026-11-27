@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1 (2026-11-27)
+
+- Crash stacks: long frame names are no longer masked as `[redacted]`. Frames are cleaned of home folders, URLs, and emails only; a C++ symbol such as `SDL_GetPerformanceFrequency` is code, not a token. The fingerprint now uses the real names. Engine error messages are cleaned as before.
+
 ## 0.5.0 (2026-11-27)
 
 - Crash stacks (P-2831): on Windows, macOS, and Linux, `app_crash` now says where the game crashed. At the next launch, the SDK reads the backtrace that Godot's crash handler wrote to the log of the crashed run (the rotated file in `user://logs/`) and adds `stack` (GDScript frames first, then C++ frames), `error_type` (for example `SIGSEGV`), `message`, `fingerprint`, `crash_source` (`godot_log`), and `symbolicated`. The SDK installs no crash handler, never sends the same log twice, reads nothing before consent, and cleans the text as engine errors. Without crash data (a force quit, a power loss, or file logging off), `app_crash` is sent as before. New option `capture_crash_stacks` (default `true`).

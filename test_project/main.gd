@@ -1518,6 +1518,7 @@ func _crash_stack_mode(result: Dictionary) -> void:
 	result["crash"] = props
 	_check(stack.begins_with("[0] _crash_launch (res://main.gd:"), "crash_stack: the top frame is not _crash_launch: %s" % stack.left(200))
 	_check(stack.contains("\n[1] "), "crash_stack: no C++ frames after the GDScript frame")
+	_check(not stack.contains("[redacted]"), "crash_stack: a frame name was masked as a token: %s" % stack.left(400))
 	_check(String(props.get("error_type", "")) in ["SIGTRAP", "SIGILL", "SIGABRT", "crash"], "crash_stack: error_type %s" % props.get("error_type"))
 	_check(String(props.get("message", "")).begins_with("Program crashed"), "crash_stack: message %s" % props.get("message"))
 	_check(String(props.get("fingerprint", "")).length() == 16, "crash_stack: no fingerprint")

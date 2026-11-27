@@ -128,6 +128,12 @@ for (const [mode, note] of OFFLINE_MODES) {
 }
 
 // 3. Crash stacks (P-2831): a real crash in OS.crash(), then the next launch.
-await crash('crash_launch', 'http://127.0.0.1:9');
-const crashed = await run('crash_stack', 'http://127.0.0.1:9');
-console.log(`godot sdk: crash_stack mode ok (${crashed.crash.error_type}, top frame ${crashed.crash.stack.split('\n')[0]})`);
+// SKIP_CRASH_TEST=1 leaves it out on a desktop where the OS shows a crash
+// dialog for each run; CI always runs it.
+if (process.env.SKIP_CRASH_TEST === '1') {
+  console.log('godot sdk: crash_stack mode skipped (SKIP_CRASH_TEST=1)');
+} else {
+  await crash('crash_launch', 'http://127.0.0.1:9');
+  const crashed = await run('crash_stack', 'http://127.0.0.1:9');
+  console.log(`godot sdk: crash_stack mode ok (${crashed.crash.error_type}, top frame ${crashed.crash.stack.split('\n')[0]})`);
+}
