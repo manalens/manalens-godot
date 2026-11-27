@@ -2,7 +2,7 @@ extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
 ##   --publishable-key=KEY  a project publishable key (required)
-##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, editor_setup, disabled, overflow, optout, corrupt, marker, fixtures, privacy, before_send, server, auto_identify, platform, traits or steam_link
+##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, editor_setup, disabled, overflow, optout, corrupt, marker, fixtures, privacy, before_send, server, auto_identify, platform, traits, steam_link or batch_413
 ##   In a web export, the same arguments come from the page URL (?mode=web_id&endpoint=...&publishable-key=...).
 ##   --run-id=ID          tag for the events (default: random)
 ##
@@ -712,6 +712,7 @@ func _more_modes(mode: String, result: Dictionary) -> void:
 		"platform": _platform_mode(result)
 		"traits": await _traits_mode(result)
 		"steam_link": await _steam_link_mode(result)
+		"batch_413": await _batch_413_mode(result)
 		_: _failures.append("unknown mode %s" % mode)
 
 
@@ -1390,4 +1391,100 @@ func _steam_link_mode(result: Dictionary) -> void:
 
 	Engine.unregister_singleton("Steam")
 	steam.free()
+	_fresh()
+
+
+## A batch SDK with `count` queued track events and nothing sent yet. Returns
+## [sdk, message IDs in queue order].
+func _batch_sdk(count: int, values: Dictionary) -> Array:
+	_fresh()
+	var sdk = load("res://batch_sdk.gd").new()
+	add_child(sdk)
+	sdk.init(_fixture_options(OFFLINE_ENDPOINT, values))
+	await get_tree().process_frame
+	sdk._queue.clear()
+	for i in count:
+		sdk.track("batch_event", {"i": i})
+	var ids: Array = []
+	for entry in sdk._queue:
+		ids.append(String(entry.event.message_id))
+	return [sdk, ids]
+
+
+## Send until the queue is empty or `requests` requests were made (at most 30 frames).
+func _batch_send(sdk, requests: int) -> void:
+	sdk.hold = false
+	sdk.flush()
+	for _frame in 30:
+		if sdk.requests.size() >= requests and not sdk.is_sending():
+			break
+		await get_tree().process_frame
+	await get_tree().process_frame
+
+
+## batch_413: a 413 splits the batch (P-2853). With a fake transport and a
+## fixed clock, so a backoff would stop all later sends. Needs no network.
+func _batch_413_mode(result: Dictionary) -> void:
+	# 1. 20 queued, 413 then 202 then 202: 20, then 10, then the other 10.
+	var made: Array = await _batch_sdk(20, {"flush_at": 20})
+	var sdk = made[0]
+	var ids: Array = made[1]
+	_check(ids.size() == 20, "batch_413: expected 20 queued events, got %d" % ids.size())
+	sdk.responses = [413, 202, 202]
+	await _batch_send(sdk, 3)
+	var sizes: Array = sdk.requests.map(func(request): return request.size())
+	result["split_sizes"] = sizes
+	_check(sizes == [20, 10, 10], "batch_413: expected requests of 20, 10, 10, got %s" % [sizes])
+	if sizes == [20, 10, 10]:
+		_check(sdk.requests[0] == ids, "batch_413: the first request is not the queue in order")
+		_check(sdk.requests[1] + sdk.requests[2] == ids, "batch_413: the halves are not the same events in the same order")
+	_check(sdk.failed.is_empty(), "batch_413: send_failed after a split: %s" % [sdk.failed])
+	_check(sdk.get_queue_size() == 0, "batch_413: %d events left" % sdk.get_queue_size())
+	_check(sdk._failures == 0 and sdk._backoff_until == 0.0, "batch_413: a 413 split counted as a failure (failures %d, backoff until %s)" % [sdk._failures, sdk._backoff_until])
+	# 2. After a success the next batch has the full size again.
+	sdk.hold = true
+	for i in 20:
+		sdk.track("batch_event", {"i": 20 + i})
+	await _batch_send(sdk, 4)
+	sizes = sdk.requests.map(func(request): return request.size())
+	result["after_success_sizes"] = sizes
+	_check(sizes.size() == 4 and sizes[3] == 20, "batch_413: the batch after a success is not full size: %s" % [sizes])
+	_stop(sdk)
+	sdk.queue_free()
+
+	# 3. 1 queued, 413: the event is dropped and send_failed(413, 1) is emitted.
+	made = await _batch_sdk(1, {"flush_at": 20})
+	var one = made[0]
+	one.responses = [413]
+	await _batch_send(one, 1)
+	result["single_failed"] = one.failed
+	_check(one.requests.size() == 1, "batch_413: expected 1 request for 1 event, got %d" % one.requests.size())
+	_check(one.failed == [[413, 1]], "batch_413: expected send_failed(413, 1), got %s" % [one.failed])
+	_check(one.get_queue_size() == 0, "batch_413: the refused event is still queued")
+	_check(one._failures == 0 and one._backoff_until == 0.0, "batch_413: a dropped 413 started a backoff")
+	_stop(one)
+	one.queue_free()
+
+	# 4. 2 queued, 413, then a batch of 1 after halving, 413, then 202:
+	# the first event is dropped, the second is sent.
+	made = await _batch_sdk(2, {"flush_at": 20})
+	var two = made[0]
+	ids = made[1]
+	two.responses = [413, 413, 202]
+	await _batch_send(two, 3)
+	result["halved_to_one"] = two.requests.map(func(request): return request.size())
+	_check(two.requests == [ids, [ids[0]], [ids[1]]], "batch_413: halved to 1: wrong requests %s" % [two.requests])
+	_check(two.failed == [[413, 1]], "batch_413: halved to 1: expected send_failed(413, 1), got %s" % [two.failed])
+	_check(two.get_queue_size() == 0, "batch_413: halved to 1: %d events left" % two.get_queue_size())
+	_stop(two)
+	two.queue_free()
+
+	# 5. Other codes keep their handling: a 400 drops the whole batch.
+	made = await _batch_sdk(4, {"flush_at": 20})
+	var bad = made[0]
+	bad.responses = [400]
+	await _batch_send(bad, 1)
+	_check(bad.requests.size() == 1 and bad.failed == [[400, 4]] and bad.get_queue_size() == 0, "batch_413: a 400 did not drop the batch: %s %s" % [bad.requests.size(), bad.failed])
+	_stop(bad)
+	bad.queue_free()
 	_fresh()

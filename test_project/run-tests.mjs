@@ -41,6 +41,7 @@ const OFFLINE_MODES = [
   ['platform', 'the platform option for console builds; console storefronts'],
   ['traits', 'traits(): anonymous and user traits, protected traits not sent, consent'],
   ['steam_link', 'link_steam() and steam_link: ticket, body, no retry of a refusal, one retry after a 429, consent and reset() during the wait'],
+  ['batch_413', 'a 413 halves the batch and sends again at once; a 413 for 1 event drops it'],
 ];
 
 function run(mode, endpoint) {

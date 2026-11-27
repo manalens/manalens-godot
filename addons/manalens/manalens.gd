@@ -25,7 +25,8 @@ extends Node
 
 signal flushed(sent: int, ok: bool)
 ## Events were dropped and will never be sent. `status` is the HTTP status
-## when the collector refused a batch (a 4xx other than 408 and 429), or 0 when
+## when the collector refused a batch (a 4xx other than 408, 413 and 429, or a
+## 413 for a batch of 1 event), or 0 when
 ## the SDK dropped events itself (the queue was over max_queue, or events were
 ## older than 7 days). `dropped` is the number of events. Network errors and 5xx
 ## responses do not emit it: those events stay queued and are sent later.
@@ -176,6 +177,7 @@ var _sending := false
 var _in_flight: Array = []  # message IDs of the batch being sent
 var _failures := 0
 var _backoff_until := 0.0
+var _batch_limit := 0  # after a 413: the largest batch to send; 0 = flush_at
 var _deferred_identify = null  # [user_id, traits] before consent
 var _game_identified := false  # the game called identify() in this launch
 var _auto_identify_tries := 0  # auto_identify attempts left in this launch
@@ -669,16 +671,25 @@ func flush() -> void:
 		return
 	var batch: Array = []
 	_in_flight.clear()
-	for entry in _queue.slice(0, int(_options.flush_at)):
+	var size := int(_options.flush_at)
+	if _batch_limit > 0:
+		size = mini(size, _batch_limit)
+	for entry in _queue.slice(0, size):
 		batch.append(entry.event)
 		_in_flight.append(entry.event.message_id)
 	var url := String(_options.endpoint).trim_suffix("/") + "/v0/events"
 	var headers := PackedStringArray(["Content-Type: application/json", "x-publishable-key: %s" % _options.publishable_key])
 	_sending = true
 	# sent_at: the device clock now. The collector corrects the event times with it, so a wrong clock gives right times (P-2799).
-	var error := _http.request(url, headers, HTTPClient.METHOD_POST, JSON.stringify({"events": batch, "sent_at": _iso(_now())}))
+	var error := _send_events(url, headers, JSON.stringify({"events": batch, "sent_at": _iso(_now())}))
 	if error != OK:
 		_on_request_completed(HTTPRequest.RESULT_CANT_CONNECT, 0, PackedStringArray(), PackedByteArray())
+
+
+## Start the POST of a batch. The answer comes to _on_request_completed().
+## The tests replace it with a fake transport.
+func _send_events(url: String, headers: PackedStringArray, body: String) -> Error:
+	return _http.request(url, headers, HTTPClient.METHOD_POST, body)
 
 
 ## End the session and try to send everything, for at most quit_timeout_s.
@@ -1349,9 +1360,23 @@ func _retry_wait(backoff: float, headers: PackedStringArray, now: float) -> floa
 func _on_request_completed(result: int, code: int, headers: PackedStringArray, _body: PackedByteArray) -> void:
 	var count := _in_flight.size()
 	var ok := result == HTTPRequest.RESULT_SUCCESS and code >= 200 and code < 300
-	# A 4xx other than 408 and 429 will fail again: drop the batch (as the
-	# Immutable and web SDKs do). Network errors and 5xx stay and back off.
+	if result == HTTPRequest.RESULT_SUCCESS and code == 413 and count > 1:
+		# The batch is too large for the collector (P-2853): keep every event in
+		# the queue and send again now with half the batch. This is not a
+		# failure: no backoff, and the failure counter does not change.
+		_batch_limit = maxi(1, floori(count / 2.0))
+		push_warning("Manalens: 413: batch of %d events too large, sending %d" % [count, _batch_limit])
+		_in_flight.clear()
+		_sending = false
+		flushed.emit(0, false)
+		flush.call_deferred()
+		return
+	# A 4xx other than 408, 413 and 429 will fail again: drop the batch (as the
+	# Immutable and web SDKs do). A 413 for 1 event is dropped too. Network
+	# errors and 5xx stay and back off.
 	var rejected := result == HTTPRequest.RESULT_SUCCESS and code >= 400 and code < 500 and code != 408 and code != 429
+	if ok:
+		_batch_limit = 0
 	if ok or rejected:
 		var sent := {}
 		for id in _in_flight:
