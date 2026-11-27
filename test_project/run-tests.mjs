@@ -42,6 +42,7 @@ const OFFLINE_MODES = [
   ['traits', 'traits(): anonymous and user traits, protected traits not sent, consent'],
   ['steam_link', 'link_steam() and steam_link: wait for the first accepted batch + 20 s, ticket, body, no retry of a refusal, one retry after a 429, consent and reset() during the wait'],
   ['batch_413', 'a 413 halves the batch and sends again at once; a 413 for 1 event drops it'],
+  ['hang', 'a stuck main thread: app_hang once per stuck period, written while stuck; not unfocused or in the first frames; app_crash links to it'],
 ];
 
 function run(mode, endpoint) {
@@ -80,6 +81,33 @@ function crash(mode, endpoint) {
       if (text.includes('MANALENS_RESULT ') || !text.includes('Program crashed')) {
         console.error(text);
         reject(new Error(`the ${mode} mode did not crash (exit ${code}, signal ${signal})`));
+      } else resolve();
+    });
+  });
+}
+
+// A mode whose main thread gets stuck for good: kill it 3 s after it says so,
+// as a player kills a frozen game.
+function killWhenStuck(mode, endpoint) {
+  const args = ['--headless', '--path', project, '--', `--endpoint=${endpoint}`, '--publishable-key=mana_pk_fixture', `--mode=${mode}`];
+  return new Promise((resolve, reject) => {
+    const child = spawn(godot, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let text = '';
+    let killer = null;
+    const onData = chunk => {
+      text += chunk;
+      if (!killer && text.includes('MANALENS_HANG_START')) killer = setTimeout(() => child.kill('SIGKILL'), 3_000);
+    };
+    child.stdout.on('data', onData);
+    child.stderr.on('data', onData);
+    const timer = setTimeout(() => child.kill('SIGKILL'), 30_000);
+    child.on('error', reject);
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      clearTimeout(killer);
+      if (text.includes('MANALENS_RESULT ') || signal !== 'SIGKILL') {
+        console.error(text);
+        reject(new Error(`the ${mode} mode was not killed while stuck (exit ${code}, signal ${signal})`));
       } else resolve();
     });
   });
@@ -137,3 +165,9 @@ if (process.env.SKIP_CRASH_TEST === '1') {
   const crashed = await run('crash_stack', 'http://127.0.0.1:9');
   console.log(`godot sdk: crash_stack mode ok (${crashed.crash.error_type}, top frame ${crashed.crash.stack.split('\n')[0]})`);
 }
+
+// 4. Hang detection (P-2833): a launch whose main thread is stuck for good is
+// killed; the next launch sends the saved app_hang and links app_crash to it.
+await killWhenStuck('hang_launch', 'http://127.0.0.1:9');
+const hung = await run('hang_crash', 'http://127.0.0.1:9');
+console.log(`godot sdk: hang_crash mode ok (app_crash hang_message_id ${hung.crash.hang_message_id})`);

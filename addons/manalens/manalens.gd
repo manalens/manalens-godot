@@ -21,7 +21,9 @@ extends Node
 ## Errors: `track_error()` sends an `error` event. On Godot 4.5+ the SDK also
 ## sends engine and script errors (`capture_engine_errors`). When the last run
 ## ended without a normal exit (a crash or a killed process), the next launch
-## sends `app_crash` in that old session.
+## sends `app_crash` in that old session. A main thread that is stuck for
+## `hang_threshold_seconds` (5 s) is sent as an `error` with `error_type`
+## `app_hang`; a crash after it has `hang_message_id`.
 
 signal flushed(sent: int, ok: bool)
 ## Events were dropped and will never be sent. `status` is the HTTP status
@@ -42,6 +44,14 @@ const LIBRARY_NAME := "Manalens Godot SDK"
 const LIBRARY_VERSION := "0.6.0"
 const CONFIG_PATH := "user://manalens.cfg"
 const QUEUE_PATH := "user://manalens_queue.json"
+## The hang that the watchdog thread saw while the main thread was stuck
+## (P-2833). The main thread sends it when it recovers; when the game was
+## killed during the hang, the next launch sends it.
+const HANG_PATH := "user://manalens_hang.json"
+## A hang is not counted in the first frames after init() (a long first load).
+const HANG_WARMUP_FRAMES := 10
+## The watchdog checks the heartbeat this often (at most).
+const HANG_POLL_MS := 250
 ## Written by set_consent(false). While it exists the SDK records nothing,
 ## whatever the config file says (fail closed if that file is lost or damaged).
 const OPTOUT_PATH := "user://manalens_optout"
@@ -148,6 +158,13 @@ var _options := {
 	## Desktop: add the engine's crash backtrace (from the rotated log file)
 	## to app_crash at the next launch. Needs file logging (on by default).
 	"capture_crash_stacks": true,
+	## Hang detection (P-2833): a watchdog thread sends an `error` with
+	## `error_type` `app_hang` when one frame takes longer than this many
+	## seconds (the main thread is stuck). 0 turns it off. Not counted while
+	## the game is unfocused or paused by the OS, in the first frames after
+	## init(), in a run from the editor with the debugger on, on web, and on a
+	## quiet server build.
+	"hang_threshold_seconds": 5.0,
 	## A dedicated server build (the `dedicated_server` feature tag, or the
 	## headless display server) is not a player. false (default): on a server
 	## build the SDK sends no game_open, session_start, session_end or
@@ -215,6 +232,20 @@ var _error_times: Array = []  # ticks (ms) of the errors sent in the last 10 s
 var _auto_errors := 0  # automatic errors sent in this session
 var _errors_dropped := 0  # errors the limits dropped in this session
 var _error_logger = null  # error_logger.gd instance (Godot 4.5+)
+## Hang detection. The fields under "_hang_mutex" are shared with the watchdog
+## thread; the main thread writes the heartbeat once per frame.
+var _hang_thread: Thread = null
+var _hang_mutex := Mutex.new()
+var _hang_stop := false  # under _hang_mutex
+var _hang_beat := 0  # under _hang_mutex: ticks (ms) of the last frame
+var _hang_armed := false  # under _hang_mutex: focused, identity on, warm-up done
+var _hang_threshold_ms := 0  # set before the thread starts
+var _hang_marker := {}  # under _hang_mutex: the hang of this stuck period, or {}
+var _hang_next_id := ""  # under _hang_mutex: the message_id of the next hang
+var _hang_clock := 0.0  # under _hang_mutex: _now() minus ticks in seconds
+var _hang_session := ""  # under _hang_mutex: the session of the heartbeat
+var _hang_crumbs := ""  # under _hang_mutex: the breadcrumbs of the heartbeat
+var _hang_frames := 0  # frames since init (main thread)
 var _number_re := RegEx.create_from_string("0x[0-9A-Fa-f]+|\\d+")
 var _quoted_re := RegEx.create_from_string("\"[^\"]*\"|'[^']*'")
 var _frame_re := RegEx.create_from_string("^\\[\\d+\\]\\s")
@@ -230,7 +261,8 @@ var _frame_noise_re := RegEx.create_from_string("^\\[\\d+\\]\\s*|0x[0-9A-Fa-f]+|
 ## Start the SDK. Keys: publishable_key, endpoint (required); enabled, app_version, build,
 ## storefront, platform, auto_identify, consent_required, flush_interval_s, flush_at, max_queue,
 ## handle_quit, quit_timeout_s, capture_engine_errors, capture_warnings,
-## max_auto_errors_per_session, track_server_builds, debug. The values of Project Settings >
+## max_auto_errors_per_session, capture_crash_stacks, hang_threshold_seconds,
+## track_server_builds, debug. The values of Project Settings >
 ## Manalens apply first; the options override them. With a key in Project
 ## Settings and auto_init on, the autoload calls init({}) itself at the end of
 ## the first frame, unless your code called init() before.
@@ -319,6 +351,7 @@ func init(options: Dictionary = {}) -> void:
 		_install_error_logger()
 	if _identity_allowed():
 		_start_identity()
+	_start_hang_watch()
 
 
 ## true in a dedicated server build: the `dedicated_server` feature tag, or the
@@ -675,6 +708,12 @@ func set_consent(granted: bool) -> void:
 	if _store_exists(QUEUE_PATH):
 		_store_remove(QUEUE_PATH)
 	_clear_error_history()
+	_hang_mutex.lock()
+	_hang_armed = false
+	_hang_marker = {}
+	if FileAccess.file_exists(HANG_PATH):
+		DirAccess.remove_absolute(HANG_PATH)
+	_hang_mutex.unlock()
 
 
 ## Event names and error counts of the old player must never reach a later error.
@@ -793,6 +832,10 @@ func _notification(what: int) -> void:
 				_closing = true
 				_close()
 		NOTIFICATION_APPLICATION_FOCUS_OUT, NOTIFICATION_APPLICATION_PAUSED:
+			# No hang while the game is in the background: the OS may stop its frames.
+			_hang_mutex.lock()
+			_hang_armed = false
+			_hang_mutex.unlock()
 			if _identity_active:
 				_focused = false
 				_last_activity_at = _now()
@@ -800,6 +843,9 @@ func _notification(what: int) -> void:
 				_save_queue()
 				flush()
 		NOTIFICATION_APPLICATION_FOCUS_IN, NOTIFICATION_APPLICATION_RESUMED:
+			_hang_mutex.lock()
+			_hang_beat = Time.get_ticks_msec()  # Count a hang from now, not from the focus loss.
+			_hang_mutex.unlock()
 			if _identity_active:
 				_focused = true
 				# Only an open session: after shutdown() the next event starts a new one.
@@ -815,6 +861,7 @@ func _close() -> void:
 
 
 func _exit_tree() -> void:
+	_stop_hang_watch()
 	if _error_logger != null:
 		OS.remove_logger(_error_logger)
 		_error_logger = null
@@ -920,12 +967,20 @@ func _start_identity() -> void:
 		_session_id = previous
 		_session_started_at = float(_cfg.get_value("session", "started_at", now))
 		_last_activity_at = float(_cfg.get_value("session", "last_activity_at", _session_started_at))
+		# A hang that the game never recovered from (it was killed while
+		# stuck), else the last hang of the session that ended: app_crash
+		# links to it.
+		var hang_id := _send_saved_hang()
+		if hang_id == "":
+			hang_id = String(_cfg.get_value("session", "hang_message_id", ""))
 		# No normal exit and the game had focus: count it as a crash (as the
 		# Sentry "abnormal" session). A game the OS closed in the background
 		# is not a crash. On web a closed or reloaded tab has no quit event,
 		# so every relaunch would look like a crash: no crash detection there.
 		if not _server_quiet and not bool(_cfg.get_value("session", "exited", false)) and bool(_cfg.get_value("session", "focused", true)) and _platform() != "web":
 			var crash := {"previous_session_id": previous}
+			if hang_id != "":
+				crash["hang_message_id"] = hang_id
 			for key in ["build", "app_version"]:
 				var value := String(_cfg.get_value("session", key, ""))
 				if value != "":
@@ -933,6 +988,8 @@ func _start_identity() -> void:
 			crash.merge(_crash_stack(_session_started_at))
 			_enqueue(_build("track", "app_crash", crash, _last_activity_at))
 		_end_session(_last_activity_at)
+	elif _store_exists(HANG_PATH):
+		_store_remove(HANG_PATH)  # The hang of a session that is gone.
 	_start_session(now)
 	if not _server_quiet:
 		_enqueue(_build("track", "game_open", {"is_first_open": first_open, "first_open_at": String(_cfg.get_value("identity", "first_open_at", _iso(now)))}))
@@ -1216,6 +1273,10 @@ func _enqueue(entry: Dictionary) -> bool:
 		_breadcrumbs.append(name)
 		if _breadcrumbs.size() > BREADCRUMBS:
 			_breadcrumbs.pop_front()
+		if _hang_thread != null:
+			_hang_mutex.lock()
+			_hang_crumbs = ",".join(_breadcrumbs).right(MAX_STRING)
+			_hang_mutex.unlock()
 	_queue.append(entry)
 	var overflow := _queue.size() - int(_options.max_queue)
 	if overflow > 0:
@@ -1490,11 +1551,14 @@ func _install_error_logger() -> void:
 	set_process(true)
 
 
-func _record_error(message: String, options: Dictionary, source: String) -> void:
+## Returns the message_id of the queued error, or "" when it was dropped.
+## `at`, `message_id` and `touch` are for hangs (P-2833): the time and the ID
+## that the watchdog saved, and no session activity at the next launch.
+func _record_error(message: String, options: Dictionary, source: String, at := -1.0, message_id := "", touch := true) -> String:
 	if not _initialized or not _identity_active:
 		if source == SOURCE_MANUAL:
 			_ready_to_record()  # Warns before init().
-		return
+		return ""
 	var severity := String(options.get("severity", "error"))
 	if not SEVERITIES.has(severity):
 		severity = "error"
@@ -1526,15 +1590,23 @@ func _record_error(message: String, options: Dictionary, source: String) -> void
 	props.merge(_scalars(options.get("properties", {}) if typeof(options.get("properties")) == TYPE_DICTIONARY else {}), false)
 	if not _error_allowed(String(props.fingerprint), source):
 		_errors_dropped += 1
-		return
-	_touch()
+		return ""
+	if touch:
+		_touch()
+	var entry := _build("track", "error", props, at)
+	if message_id != "":
+		entry.event["message_id"] = message_id
+	var app = options.get("app")
+	if typeof(app) == TYPE_DICTIONARY:
+		entry.event.context.app.merge(app, true)
 	# before_send runs in _enqueue, after the fingerprint and the limits.
-	if not _enqueue(_build("track", "error", props)):
-		return
+	if not _enqueue(entry):
+		return ""
 	if source == SOURCE_AUTO:
 		_auto_errors += 1
 	# Keep the error on disk now: a crash can follow it.
 	_save_queue()
+	return String(entry.event.message_id)
 
 
 ## The limits. Manual errors skip only the per-session cap.
@@ -1564,6 +1636,172 @@ func _fingerprint(error_type: String, message: String, file: String, function: S
 	else:
 		basis = "%s|%s" % [error_type, _number_re.sub(_quoted_re.sub(message, "?", true), "N", true)]
 	return basis.sha1_text().left(16)
+
+
+# Hang detection (P-2833) -----------------------------------------------------
+# A watchdog thread checks the heartbeat that the main thread writes once per
+# frame (SceneTree.process_frame, which runs also while the tree is paused).
+# When the heartbeat is older than hang_threshold_seconds, the main thread is
+# stuck: the watchdog writes the hang to HANG_PATH at once, because the player
+# may kill the game before it recovers. Godot cannot read the stack of the main
+# thread from another thread, so a hang has no stack. The watchdog reads and
+# writes only the _hang_* fields under _hang_mutex and its own file.
+
+func _start_hang_watch() -> void:
+	var threshold := float(_options.hang_threshold_seconds)
+	if threshold <= 0.0 or _thread_unsafe_for_hangs():
+		return
+	_hang_threshold_ms = maxi(1, int(threshold * 1000.0))
+	_hang_frames = 0
+	_hang_mutex.lock()
+	_hang_stop = false
+	_hang_armed = false
+	_hang_beat = Time.get_ticks_msec()
+	_hang_next_id = _random_uuid()
+	_hang_clock = _now() - _hang_beat / 1000.0
+	_hang_session = _session_id
+	_hang_mutex.unlock()
+	get_tree().process_frame.connect(_hang_frame)
+	_hang_thread = Thread.new()
+	_hang_thread.start(_hang_watch)
+
+
+## No watchdog on web (no threads in most exports, and no app_crash), on a
+## quiet server build (no app_crash), and in a run from the editor with the
+## debugger on (a breakpoint stops the main thread).
+func _thread_unsafe_for_hangs() -> bool:
+	return _platform() == "web" or _server_quiet or EngineDebugger.is_active()
+
+
+func _stop_hang_watch() -> void:
+	if _hang_thread == null:
+		return
+	_hang_mutex.lock()
+	_hang_stop = true
+	_hang_mutex.unlock()
+	_hang_thread.wait_to_finish()
+	_hang_thread = null
+	if get_tree() != null and get_tree().process_frame.is_connected(_hang_frame):
+		get_tree().process_frame.disconnect(_hang_frame)
+
+
+## The heartbeat (main thread, once per frame).
+func _hang_frame() -> void:
+	var now := Time.get_ticks_msec()
+	_hang_frames += 1
+	_hang_mutex.lock()
+	var marker := _hang_marker
+	var started := _hang_beat
+	_hang_beat = now
+	_hang_marker = {}
+	_hang_armed = _identity_active and _focused and not _closing and _hang_frames > HANG_WARMUP_FRAMES
+	_hang_session = _session_id
+	_hang_clock = _now() - now / 1000.0
+	if not marker.is_empty():
+		_hang_next_id = _random_uuid()
+	_hang_mutex.unlock()
+	if not marker.is_empty():
+		_record_recovered_hang(marker, now - started)
+
+
+## The main thread is back after a hang: send it once, with its duration.
+func _record_recovered_hang(marker: Dictionary, duration_ms: int) -> void:
+	var id := _record_error(_hang_message(marker), {
+		"severity": "error",
+		"error_type": "app_hang",
+		"handled": true,
+		"properties": {"hang_duration_ms": duration_ms},
+	}, SOURCE_AUTO, float(marker.started_at), String(marker.message_id))
+	if id != "" and _session_id != "":
+		# A crash later in this session links to this hang.
+		_cfg.set_value("session", "hang_message_id", id)
+		_save_session()
+	# Remove the saved hang only now: the error is in the queue file. Keep the
+	# file of a newer hang that started since.
+	_hang_mutex.lock()
+	if _hang_marker.is_empty() and _store_exists(HANG_PATH):
+		_store_remove(HANG_PATH)
+	_hang_mutex.unlock()
+
+
+## Next launch: the hang that the watchdog saved while the main thread was
+## stuck, and that it never recovered from. Returns its message_id, or "".
+func _send_saved_hang() -> String:
+	var text = _store_read(HANG_PATH)
+	if text == null:
+		return ""
+	_store_remove(HANG_PATH)
+	var marker = JSON.parse_string(String(text)) if text is String else null
+	if typeof(marker) != TYPE_DICTIONARY or String(marker.get("message_id", "")) == "":
+		return ""
+	var id := String(marker.message_id)
+	for entry in _queue:
+		if String(entry.event.get("message_id", "")) == id:
+			return id  # Already queued: the game recovered, then was killed.
+	var app := {}
+	for key in ["build", "app_version"]:
+		var value := String(_cfg.get_value("session", key, ""))
+		if value != "":
+			app[key] = value
+	var session := _session_id
+	if String(marker.get("session_id", "")) != "":
+		_session_id = String(marker.session_id)
+	var props := {}
+	if String(marker.get("breadcrumbs", "")) != "":
+		props["breadcrumbs"] = String(marker.breadcrumbs).right(MAX_STRING)
+	id = _record_error(_hang_message(marker), {
+		"severity": "error",
+		"error_type": "app_hang",
+		"handled": false,
+		"app": app,
+		"properties": props,
+	}, SOURCE_AUTO, float(marker.get("started_at", _last_activity_at)), id, false)
+	_session_id = session
+	return id
+
+
+func _hang_message(marker: Dictionary) -> String:
+	return "The main thread was stuck for more than %s s" % String.num(float(marker.get("threshold_s", 0.0)), 1)
+
+
+## The watchdog thread. It never calls the SDK or the engine's scene tree.
+func _hang_watch() -> void:
+	var last_wake := Time.get_ticks_msec()
+	var poll := clampi(_hang_threshold_ms / 4, 10, HANG_POLL_MS)
+	while true:
+		OS.delay_msec(poll)
+		var now := Time.get_ticks_msec()
+		_hang_mutex.lock()
+		if _hang_stop:
+			_hang_mutex.unlock()
+			return
+		# This thread itself slept much longer than asked: the whole process was
+		# stopped (system sleep, a mobile app in the background). Not a hang.
+		if now - last_wake > poll * 4 + 1000:
+			_hang_beat = now
+		last_wake = now
+		if _hang_armed and _hang_marker.is_empty() and now - _hang_beat >= _hang_threshold_ms:
+			_hang_marker = {
+				"message_id": _hang_next_id,
+				"session_id": _hang_session,
+				"started_at": _hang_clock + _hang_beat / 1000.0,
+				"threshold_s": _hang_threshold_ms / 1000.0,
+				"breadcrumbs": _hang_crumbs,
+			}
+			# Write it now: the player may kill the game while it is stuck.
+			_write_hang_marker(JSON.stringify(_hang_marker))
+		_hang_mutex.unlock()
+
+
+## Watchdog thread, under _hang_mutex: a temp file, then a rename.
+func _write_hang_marker(text: String) -> void:
+	var tmp := HANG_PATH + ".tmp"
+	var file := FileAccess.open(tmp, FileAccess.WRITE)
+	if file == null:
+		return
+	file.store_string(text)
+	file.close()
+	DirAccess.rename_absolute(tmp, HANG_PATH)
 
 
 # Crash stacks (sdks/SPEC.md "Crash stacks") ------------------------------------
@@ -2026,6 +2264,10 @@ func _iso(unix: float) -> String:
 
 
 func _uuid() -> String:
+	return _random_uuid()
+
+
+static func _random_uuid() -> String:
 	var bytes := Crypto.new().generate_random_bytes(16)
 	bytes[6] = (bytes[6] & 0x0f) | 0x40
 	bytes[8] = (bytes[8] & 0x3f) | 0x80

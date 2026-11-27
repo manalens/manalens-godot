@@ -2,7 +2,7 @@ extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
 ##   --publishable-key=KEY  a project publishable key (required)
-##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, editor_setup, disabled, overflow, optout, corrupt, marker, fixtures, privacy, before_send, server, auto_identify, platform, traits, steam_link, batch_413, crash_launch or crash_stack
+##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, editor_setup, disabled, overflow, optout, corrupt, marker, fixtures, privacy, before_send, server, auto_identify, platform, traits, steam_link, batch_413, crash_launch, crash_stack, hang, hang_launch or hang_crash
 ##   In a web export, the same arguments come from the page URL (?mode=web_id&endpoint=...&publishable-key=...).
 ##   --run-id=ID          tag for the events (default: random)
 ##
@@ -715,6 +715,9 @@ func _more_modes(mode: String, result: Dictionary) -> void:
 		"batch_413": await _batch_413_mode(result)
 		"crash_launch": await _crash_launch(result)
 		"crash_stack": await _crash_stack_mode(result)
+		"hang": await _hang_mode(result)
+		"hang_launch": await _hang_launch(result)
+		"hang_crash": _hang_crash_mode(result)
 		_: _failures.append("unknown mode %s" % mode)
 
 
@@ -1138,7 +1141,7 @@ func _fixture_options(endpoint: String, values: Dictionary) -> Dictionary:
 
 
 func _fresh() -> void:
-	for path in ["user://manalens.cfg", "user://manalens_queue.json", "user://manalens_queue.json.tmp", "user://manalens_optout", "user://manalens.cfg.unreadable", "user://manalens.cfg.tmp"]:
+	for path in ["user://manalens_hang.json", "user://manalens.cfg", "user://manalens_queue.json", "user://manalens_queue.json.tmp", "user://manalens_optout", "user://manalens.cfg.unreadable", "user://manalens.cfg.tmp"]:
 		if FileAccess.file_exists(path):
 			DirAccess.remove_absolute(path)
 
@@ -1618,3 +1621,147 @@ func _crash_sdk(endpoint: String, capture: bool):
 	sdk.init(options)
 	await get_tree().process_frame
 	return sdk
+
+
+# Hang detection (P-2833) -------------------------------------------------------
+
+## The queued app_hang errors of `sdk`, oldest first.
+func _hangs(sdk) -> Array:
+	var out := []
+	for entry in sdk._queue:
+		var event: Dictionary = entry.get("event", {})
+		if event.get("event") == "error" and event.get("properties", {}).get("error_type") == "app_hang":
+			out.append(event)
+	return out
+
+
+## _stop() and the watchdog thread.
+func _stop_hangs(sdk) -> void:
+	sdk._stop_hang_watch()
+	_stop(sdk)
+
+
+func _frames(count: int) -> void:
+	for i in count:
+		await get_tree().process_frame
+
+
+## hang: the main thread is stuck for longer than hang_threshold_seconds. The
+## watchdog writes the hang to disk while the main thread is stuck; the main
+## thread sends it once when it recovers, with hang_duration_ms and no stack. No
+## hang in the first frames or while the game is unfocused; 0 turns it off;
+## before_send can drop it; a crash later in the session links to it. Needs no
+## network.
+func _hang_mode(result: Dictionary) -> void:
+	_fresh()
+	var off = load("res://fixture_sdk.gd").new()
+	add_child(off)
+	off.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50, "hang_threshold_seconds": 0}))
+	_check(off._hang_thread == null, "hang: hang_threshold_seconds = 0 started the watchdog")
+	_stop_hangs(off)
+	off.queue_free()
+	_fresh()
+
+	var sdk = load("res://fixture_sdk.gd").new()
+	add_child(sdk)
+	sdk.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50, "hang_threshold_seconds": 0.3}))
+	_check(sdk._hang_thread != null, "hang: no watchdog thread")
+	# A long first frame (a load) is not a hang.
+	OS.delay_msec(700)
+	await _frames(2)
+	_check(_hangs(sdk).is_empty(), "hang: a stall in the first frames after init was sent")
+	await _frames(15)
+
+	# Stuck for 1 s: on disk while stuck, sent once when the main thread is back.
+	sdk.track("before_hang")
+	OS.delay_msec(1000)
+	_check(FileAccess.file_exists("user://manalens_hang.json"), "hang: the watchdog did not write the hang while the main thread was stuck")
+	await _frames(3)
+	var hangs := _hangs(sdk)
+	_check(hangs.size() == 1, "hang: expected 1 app_hang for one stuck period, got %d" % hangs.size())
+	if hangs.size() >= 1:
+		var props: Dictionary = hangs[0].properties
+		result["hang"] = props
+		_check(props.get("severity") == "error" and props.get("handled") == true and props.get("source") == "auto", "hang: severity, handled or source: %s" % props)
+		_check(int(props.get("hang_duration_ms", 0)) >= 900, "hang: hang_duration_ms %s" % props.get("hang_duration_ms"))
+		_check(not props.has("stack"), "hang: Godot cannot read the main thread stack, but a stack was sent")
+		_check(String(props.get("breadcrumbs", "")).contains("before_hang"), "hang: no breadcrumbs")
+		_check(String(sdk._cfg.get_value("session", "hang_message_id", "")) == String(hangs[0].message_id), "hang: the session state does not keep the hang's message_id")
+	_check(not FileAccess.file_exists("user://manalens_hang.json"), "hang: the saved hang was not removed after the main thread recovered")
+
+	# Unfocused: no hang. Focused again: a hang.
+	sdk.notification(NOTIFICATION_APPLICATION_FOCUS_OUT)
+	await _frames(2)
+	OS.delay_msec(800)
+	await _frames(2)
+	_check(_hangs(sdk).size() == 1, "hang: a stall while unfocused was sent")
+	sdk.notification(NOTIFICATION_APPLICATION_FOCUS_IN)
+	await _frames(2)
+	OS.delay_msec(1200)
+	await _frames(2)
+	_check(_hangs(sdk).size() == 2, "hang: no app_hang after focus came back (%d)" % _hangs(sdk).size())
+
+	# before_send drops the hang: no link to it.
+	var kept := String(sdk._cfg.get_value("session", "hang_message_id", ""))
+	sdk.set_before_send(func(event):
+		return null if event.get("properties", {}).get("error_type") == "app_hang" else event)
+	OS.delay_msec(1200)
+	await _frames(2)
+	_check(_hangs(sdk).size() == 2, "hang: before_send did not drop app_hang")
+	_check(String(sdk._cfg.get_value("session", "hang_message_id", "")) == kept, "hang: a dropped hang changed hang_message_id")
+	sdk.set_before_send(Callable())
+
+	# The game crashes later in this session: app_crash links to the last hang.
+	var session: String = sdk._session_id
+	sdk._save_session()
+	sdk._save_queue()
+	_stop_hangs(sdk)
+	sdk.queue_free()
+	var next = load("res://fixture_sdk.gd").new()
+	add_child(next)
+	next.clock += 60.0
+	next.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50}))
+	var crash := _crash_props(next, session)
+	_check(String(crash.get("hang_message_id", "")) == kept and kept != "", "hang: app_crash has hang_message_id %s, expected %s" % [crash.get("hang_message_id"), kept])
+	_stop_hangs(next)
+	next.queue_free()
+	_fresh()
+
+
+## hang_launch: the main thread gets stuck for good; run-tests.mjs kills the
+## process (as a player kills a frozen game). Never prints MANALENS_RESULT.
+func _hang_launch(_result: Dictionary) -> void:
+	_fresh()
+	var options := _options(String(_args["endpoint"]))
+	options["hang_threshold_seconds"] = 1.0
+	Manalens.init(options)
+	await _frames(20)
+	Manalens.track("before_hang")
+	print("MANALENS_HANG_START")
+	while true:
+		OS.delay_msec(100)
+
+
+## hang_crash: the launch after hang_launch. The hang that the watchdog saved
+## while the game was stuck is sent in the old session (handled false, no
+## stack), and app_crash has its message_id as hang_message_id.
+func _hang_crash_mode(result: Dictionary) -> void:
+	var sdk = Manalens
+	sdk.init(_options(String(_args["endpoint"])))
+	var hangs := _hangs(sdk)
+	var crash := _crash_props(sdk, "")
+	result["hang"] = hangs[0].properties if hangs.size() == 1 else {}
+	result["crash"] = crash
+	_check(hangs.size() == 1, "hang_crash: expected 1 app_hang from the killed launch, got %d" % hangs.size())
+	_check(not crash.is_empty(), "hang_crash: no app_crash after the killed launch")
+	if hangs.size() == 1 and not crash.is_empty():
+		var hang: Dictionary = hangs[0]
+		_check(crash.get("hang_message_id") == hang.message_id, "hang_crash: hang_message_id %s is not the hang %s" % [crash.get("hang_message_id"), hang.message_id])
+		_check(hang.get("session_id") == crash.get("previous_session_id"), "hang_crash: the hang is not in the old session")
+		_check(hang.properties.get("handled") == false and hang.properties.get("severity") == "error", "hang_crash: handled or severity: %s" % hang.properties)
+		_check(not hang.properties.has("stack") and not hang.properties.has("hang_duration_ms"), "hang_crash: a stack or a duration for a hang that never ended")
+		_check(String(hang.properties.get("breadcrumbs", "")).contains("before_hang"), "hang_crash: no breadcrumbs from the stuck launch")
+		_check(hang.context.app.get("build") == "godot-test", "hang_crash: context.app.build %s" % hang.context.app.get("build"))
+	_check(not FileAccess.file_exists("user://manalens_hang.json"), "hang_crash: the saved hang was not removed")
+	_stop_hangs(sdk)
+	_fresh()

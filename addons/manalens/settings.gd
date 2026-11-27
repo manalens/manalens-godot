@@ -22,6 +22,7 @@ const ITEMS := [
 	["auto_identify", TYPE_STRING, "", PROPERTY_HINT_ENUM_SUGGESTION, ",steam", false],
 	["steam_link", TYPE_BOOL, false, PROPERTY_HINT_NONE, "", false],
 	["track_server_builds", TYPE_BOOL, false, PROPERTY_HINT_NONE, "", false],
+	["hang_threshold_seconds", TYPE_FLOAT, 5.0, PROPERTY_HINT_RANGE, "0,60,0.5,or_greater", false],
 ]
 
 
