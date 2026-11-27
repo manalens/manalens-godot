@@ -21,7 +21,7 @@ extends Node
 ## Errors: `track_error()` sends an `error` event. On Godot 4.5+ the SDK also
 ## sends engine and script errors (`capture_engine_errors`). When the last run
 ## ended without a normal exit (a crash or a killed process), the next launch
-## sends `app_unclean_exit` in that old session.
+## sends `app_crash` in that old session.
 
 signal flushed(sent: int, ok: bool)
 ## Events were dropped and will never be sent. `status` is the HTTP status
@@ -74,6 +74,9 @@ const STEAM_RESULT_OK := 1
 ## Project Settings > Manalens (publishable_key, endpoint, auto_init, ...).
 const Settings := preload("res://addons/manalens/settings.gd")
 const SEVERITIES := ["debug", "info", "warning", "error", "critical"]
+## The source of an error: a track_error() call, or an automatic capture.
+const SOURCE_MANUAL := "manual"
+const SOURCE_AUTO := "auto"
 const ERROR_LOGGER_PATH := "res://addons/manalens/error_logger.gd"
 ## Error limits (as Sentry Godot): the same fingerprint at most once a second,
 ## at most 20 errors in 10 seconds, at most 5 automatic errors in one frame.
@@ -138,7 +141,7 @@ var _options := {
 	## A dedicated server build (the `dedicated_server` feature tag, or the
 	## headless display server) is not a player. false (default): on a server
 	## build the SDK sends no game_open, session_start, session_end or
-	## app_unclean_exit, so the server does not count as an install or a
+	## app_crash, so the server does not count as an install or a
 	## session. track() and identify() still work. true: a server build sends
 	## them as a client does.
 	"track_server_builds": false,
@@ -257,7 +260,7 @@ func init(options: Dictionary = {}) -> void:
 	_initialized = true
 	_server_quiet = is_server_build() and not bool(_options.track_server_builds)
 	if _server_quiet:
-		print("Manalens: server build (dedicated_server or headless); no game_open, session or unclean exit events. Set track_server_builds to send them")
+		print("Manalens: server build (dedicated_server or headless); no game_open, session or app_crash events. Set track_server_builds to send them")
 	_web_storage = OS.has_feature("web") and _web_storage_available()
 	if _web_storage:
 		var text = _store_read(CONFIG_PATH)
@@ -326,7 +329,7 @@ func track(event: String, properties: Dictionary = {}) -> void:
 ##                file and function, or of the message without numbers
 ##   properties   more scalar properties (level, mode, ...)
 func track_error(message: String, options: Dictionary = {}) -> void:
-	_record_error(message, options, "manual")
+	_record_error(message, options, SOURCE_MANUAL)
 
 
 ## A function that gets each event before it is queued: track events (also
@@ -829,8 +832,8 @@ func _process(_delta: float) -> void:
 			"file": String(item.file),
 			"line": int(item.line),
 			"function": String(item.function),
-			"properties": {"engine_error_type": kind},
-		}, "godot_logger")
+			"properties": {"log_type": kind},
+		}, SOURCE_AUTO)
 
 
 func _on_tick() -> void:
@@ -893,13 +896,13 @@ func _start_identity() -> void:
 				var value := String(_cfg.get_value("session", key, ""))
 				if value != "":
 					crash["previous_" + key] = value
-			_enqueue(_build("track", "app_unclean_exit", crash, _last_activity_at))
+			_enqueue(_build("track", "app_crash", crash, _last_activity_at))
 		_end_session(_last_activity_at)
 	_start_session(now)
 	if not _server_quiet:
 		_enqueue(_build("track", "game_open", {"is_first_open": first_open, "first_open_at": String(_cfg.get_value("identity", "first_open_at", _iso(now)))}))
 	_save_cfg()
-	# Write game_open (the install signal) and app_unclean_exit to disk before
+	# Write game_open (the install signal) and app_crash to disk before
 	# any send: a process killed before the next save would lose them.
 	_save_queue()
 	if _deferred_identify != null:
@@ -1436,7 +1439,7 @@ func _install_error_logger() -> void:
 
 func _record_error(message: String, options: Dictionary, source: String) -> void:
 	if not _initialized or not _identity_active:
-		if source == "manual":
+		if source == SOURCE_MANUAL:
 			_ready_to_record()  # Warns before init().
 		return
 	var severity := String(options.get("severity", "error"))
@@ -1475,7 +1478,7 @@ func _record_error(message: String, options: Dictionary, source: String) -> void
 	# before_send runs in _enqueue, after the fingerprint and the limits.
 	if not _enqueue(_build("track", "error", props)):
 		return
-	if source != "manual":
+	if source == SOURCE_AUTO:
 		_auto_errors += 1
 	# Keep the error on disk now: a crash can follow it.
 	_save_queue()
@@ -1489,7 +1492,7 @@ func _error_allowed(fingerprint: String, source: String) -> bool:
 	_error_times = _error_times.filter(func(at): return now - int(at) < ERROR_WINDOW_MS)
 	if _error_times.size() >= ERROR_WINDOW_MAX:
 		return false
-	if source != "manual" and _auto_errors >= int(_options.max_auto_errors_per_session):
+	if source == SOURCE_AUTO and _auto_errors >= int(_options.max_auto_errors_per_session):
 		return false
 	_error_seen[fingerprint] = now
 	_error_times.append(now)

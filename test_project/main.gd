@@ -12,7 +12,7 @@ extends Node
 ##           queued and no ID is stored; then set_consent(true).
 ## recovery: keeps the ID; plants a session that was left open 2 hours ago (a
 ##           crash) and checks that init ends it with session_end and sends
-##           app_unclean_exit.
+##           app_crash.
 ## errors:   fresh state; track_error, before_send, the dedupe limit and an
 ##           engine error from push_error (Godot 4.5+ logger).
 ##
@@ -25,7 +25,7 @@ extends Node
 ##           trimmed to 50 keys and 8 KB (P-2700). Needs no network.
 ##
 ## web_reload: a launch that ends without a quit (a reloaded or closed tab), then
-##           a second launch. On web: no app_unclean_exit; on windows (the
+##           a second launch. On web: no app_crash; on windows (the
 ##           control): one. The old session ends in both. Needs no network.
 ##
 ## install_kill: a first launch with no network is killed before any send, tick,
@@ -303,20 +303,20 @@ func _web_reload(_run_id: String, result: Dictionary) -> void:
 		add_child(second)
 		second.init(_fixture_options(OFFLINE_ENDPOINT, {}))
 		var platform: String = second._platform()
-		var unclean := 0
+		var crashes := 0
 		var ended := 0
 		for entry in second._queue:
 			var event: Dictionary = entry.event
-			if String(event.get("event", "")) == "app_unclean_exit":
-				unclean += 1
+			if String(event.get("event", "")) == "app_crash":
+				crashes += 1
 			if String(event.get("event", "")) == "session_end" and String(event.session_id) == session:
 				ended += 1
-		result["%s_unclean_exit" % platform] = unclean
+		result["%s_app_crash" % platform] = crashes
 		_check(ended == 1, "%s: the old session did not end" % platform)
 		if platform == "web":
-			_check(unclean == 0, "web: a reload sent app_unclean_exit")
+			_check(crashes == 0, "web: a reload sent app_crash")
 		else:
-			_check(unclean == 1, "%s: no app_unclean_exit after a launch without a quit" % platform)
+			_check(crashes == 1, "%s: no app_crash after a launch without a quit" % platform)
 		first.queue_free()
 		second._timer.stop()
 		second.set_process(false)
@@ -653,7 +653,7 @@ func _marker(run_id: String, result: Dictionary) -> void:
 
 
 ## The fixture scenario. Launch 1 plays, identifies, hits an error, then
-## crashes (no quit). Launch 2 sends app_unclean_exit and session_end of the
+## crashes (no quit). Launch 2 sends app_crash and session_end of the
 ## crashed session, then quits cleanly.
 func _fixtures(_run_id: String, result: Dictionary) -> void:
 	_fresh()
@@ -718,11 +718,11 @@ func _more_modes(mode: String, result: Dictionary) -> void:
 ## server: a dedicated server build (G-2533). `--headless` makes the display
 ## server "headless", so this run is a server build. Without
 ## track_server_builds: no game_open, session_start, session_end or
-## app_unclean_exit, and no install; track() and identify() still work. With
+## app_crash, and no install; track() and identify() still work. With
 ## the option (as in this project's Project Settings): the client events come
 ## back. Needs no network. pnpm test:godot runs it after the fixtures.
 func _server_mode(result: Dictionary) -> void:
-	const AUTOMATIC := ["game_open", "session_start", "session_end", "app_unclean_exit"]
+	const AUTOMATIC := ["game_open", "session_start", "session_end", "app_crash"]
 	result["display_server"] = DisplayServer.get_name()
 	_check(Manalens.is_server_build(), "server: a --headless run is not a server build (display server %s)" % DisplayServer.get_name())
 	# Off (the default): the init() option wins over the Project Setting.
@@ -845,8 +845,9 @@ func _privacy(result: Dictionary) -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame
 	error = _last_named(sdk, "error")
-	_check(error != null and error.properties.get("source") == "godot_logger", "privacy: the engine error was not captured")
+	_check(error != null and error.properties.get("source") == "auto", "privacy: the engine error was not captured")
 	if error != null:
+		_check(String(error.properties.get("log_type", "")) == "error", "privacy: the engine error log_type is %s" % error.properties.get("log_type"))
 		_check(String(error.properties.message) == "Cannot load ~/Saved/a.sav for [email]?token=[redacted]", "privacy: the engine message is %s" % error.properties.message)
 	sdk.track_error("Mail support@example.com about /Users/anna/x")
 	error = _last_named(sdk, "error")

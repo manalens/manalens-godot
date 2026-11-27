@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Breaking: standard names for error and crash events (the same in the Unity, Godot, and Unreal SDKs).
+  - The crash event `app_unclean_exit` is now `app_crash`. Its properties (`previous_session_id`, `previous_build`, `previous_app_version`) and the rule that sends it do not change.
+  - The `source` property of an `error` event is now `manual` (a `track_error()` call) or `auto` (any automatic capture). The old value `godot_logger` is now `auto`. The engine is in `context.app.engine`.
+  - The engine log level of an automatic capture is now `log_type` (`error`, `script`, or `warning`). It was `engine_error_type`.
+  - The per-session cap (`max_auto_errors_per_session`) applies to `auto` errors only, as before.
+
 ## 0.3.0 (2026-11-27)
 
 - New `traits(traits)` (P-2814): set traits on this player, with or without a player ID. Before `identify()` the traits belong to the anonymous ID of this install. The protected traits `email`, `itch_user_id`, `stripe_customer_id`, and `paddle_customer_id` are not sent (one warning). Calls before consent are merged and sent after consent.
