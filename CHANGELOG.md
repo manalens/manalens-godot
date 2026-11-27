@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 (2026-11-27)
 
 - A `413` response (batch too large) no longer drops the batch (P-2853). The SDK keeps the events in the queue, in the same order, and sends again at once with half the batch (at least 1 event). This is not a failure: no backoff wait, and the failure counter does not change. A `413` for a batch of 1 event drops that event and emits `send_failed(413, 1)`. After a success, the batch size is `flush_at` again. Other status codes keep their handling.
 - Docs: the README says why the SDK does not skip sends while the device has no network (P-2853). Godot 4 has no OS reachability API, so the backoff after network errors does not change. No change in behavior.
