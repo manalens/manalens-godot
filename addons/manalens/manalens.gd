@@ -39,7 +39,7 @@ signal send_failed(status: int, dropped: int)
 signal steam_linked(linked: bool, status: int, code: String)
 
 const LIBRARY_NAME := "Manalens Godot SDK"
-const LIBRARY_VERSION := "0.4.1"
+const LIBRARY_VERSION := "0.5.0"
 const CONFIG_PATH := "user://manalens.cfg"
 const QUEUE_PATH := "user://manalens_queue.json"
 ## Written by set_consent(false). While it exists the SDK records nothing,
@@ -139,6 +139,9 @@ var _options := {
 	"capture_warnings": false,
 	## Automatic errors in one session; track_error() calls do not count.
 	"max_auto_errors_per_session": 50,
+	## Desktop: add the engine's crash backtrace (from the rotated log file)
+	## to app_crash at the next launch. Needs file logging (on by default).
+	"capture_crash_stacks": true,
 	## A dedicated server build (the `dedicated_server` feature tag, or the
 	## headless display server) is not a player. false (default): on a server
 	## build the SDK sends no game_open, session_start, session_end or
@@ -206,6 +209,12 @@ var _errors_dropped := 0  # errors the limits dropped in this session
 var _error_logger = null  # error_logger.gd instance (Godot 4.5+)
 var _number_re := RegEx.create_from_string("0x[0-9A-Fa-f]+|\\d+")
 var _quoted_re := RegEx.create_from_string("\"[^\"]*\"|'[^']*'")
+var _frame_re := RegEx.create_from_string("^\\[\\d+\\]\\s")
+var _signal_re := RegEx.create_from_string("signal (\\d+)")
+var _source_line_re := RegEx.create_from_string("\\.(cpp|h|c|mm):\\d+")
+## Removed from a frame for the crash fingerprint: the index, addresses,
+## offsets, and line numbers.
+var _frame_noise_re := RegEx.create_from_string("^\\[\\d+\\]\\s*|0x[0-9A-Fa-f]+|\\b[0-9A-Fa-f]{6,}\\b|\\+\\s*[0-9A-Fa-fx]+|:\\d+")
 
 
 # Public API ------------------------------------------------------------------
@@ -907,6 +916,7 @@ func _start_identity() -> void:
 				var value := String(_cfg.get_value("session", key, ""))
 				if value != "":
 					crash["previous_" + key] = value
+			crash.merge(_crash_stack(_session_started_at))
 			_enqueue(_build("track", "app_crash", crash, _last_activity_at))
 		_end_session(_last_activity_at)
 	_start_session(now)
@@ -1536,6 +1546,128 @@ func _fingerprint(error_type: String, message: String, file: String, function: S
 	else:
 		basis = "%s|%s" % [error_type, _number_re.sub(_quoted_re.sub(message, "?", true), "N", true)]
 	return basis.sha1_text().left(16)
+
+
+# Crash stacks (sdks/SPEC.md "Crash stacks") ------------------------------------
+
+const CRASH_LOG_TAIL_BYTES := 262144
+const CRASH_STACK_MAX := 4096
+const CRASH_FINGERPRINT_FRAMES := 5
+## Signal numbers of the POSIX crash handlers. SIGBUS is 7 on Linux, 10 on macOS.
+const SIGNAL_NAMES := {4: "SIGILL", 5: "SIGTRAP", 6: "SIGABRT", 8: "SIGFPE", 11: "SIGSEGV"}
+
+
+## The crash data of the session that crashed, for app_crash: the engine's
+## crash handler writes a backtrace to the log, and Godot rotates that log
+## at the next launch (debug/file_logging). The SDK installs no crash handler.
+## Reads the newest rotated log written after `started_at`, at most once per
+## file. Returns {} when there is none, on mobile and web, or when
+## capture_crash_stacks is off.
+func _crash_stack(started_at: float) -> Dictionary:
+	if not bool(_options.capture_crash_stacks) or not _platform() in ["windows", "macos", "linux"]:
+		return {}
+	var path := _crash_log_path(started_at)
+	if path == "":
+		return {}
+	var modified := FileAccess.get_modified_time(path)
+	if String(_cfg.get_value("crash", "log", "")) == path and int(_cfg.get_value("crash", "log_time", 0)) == modified:
+		return {}  # Already sent.
+	_cfg.set_value("crash", "log", path)
+	_cfg.set_value("crash", "log_time", modified)
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return {}
+	var length := file.get_length()
+	file.seek(maxi(0, length - CRASH_LOG_TAIL_BYTES))
+	var text := file.get_buffer(length - file.get_position()).get_string_from_utf8()
+	file.close()
+	return _parse_crash_log(text)
+
+
+## The newest rotated log file (godot<time>.log next to the current log)
+## changed at or after `started_at`, or "".
+func _crash_log_path(started_at: float) -> String:
+	var current := String(ProjectSettings.get_setting_with_override("debug/file_logging/log_path"))
+	if current == "":
+		return ""
+	var dir := current.get_base_dir()
+	var stem := current.get_file().get_basename()
+	var ext := current.get_extension()
+	var best := ""
+	var best_time := 0
+	for name in DirAccess.get_files_at(dir):
+		if name == current.get_file() or not name.begins_with(stem) or name.get_extension() != ext:
+			continue
+		var path := dir.path_join(name)
+		var modified := FileAccess.get_modified_time(path)
+		# File times have whole seconds.
+		if modified + 1 >= started_at and modified > best_time:
+			best = path
+			best_time = modified
+	return best
+
+
+## The last crash block of a Godot log: the GDScript frames first (the game's
+## code), then the C++ frames. The block starts at the fixed "Program crashed"
+## line; the crash handler message (debug/settings/crash_handler/message) is
+## only on the "Dumping the backtrace" line, so it does not matter here.
+func _parse_crash_log(text: String) -> Dictionary:
+	var start := text.rfind("Program crashed")
+	if start < 0:
+		return {}
+	var lines := text.substr(start).split("\n")
+	var header := lines[0].strip_edges()
+	var cpp: Array = []
+	var script: Array = []
+	var section := "cpp"
+	for i in range(1, lines.size()):
+		var line := lines[i].strip_edges()
+		if line.begins_with("-- END OF C++"):
+			section = ""
+		elif line.begins_with("GDScript backtrace"):
+			section = "script"
+		elif line.begins_with("-- END OF GDSCRIPT"):
+			break
+		elif section != "" and _frame_re.search(line) != null:
+			(script if section == "script" else cpp).append(line)
+	var error_type := "crash"
+	var found := _signal_re.search(header)
+	if found != null:
+		var number := int(found.get_string(1))
+		var bus := 10 if _platform() == "macos" else 7
+		error_type = "SIGBUS" if number == bus else String(SIGNAL_NAMES.get(number, "signal %d" % number))
+	var homes := _home_dirs()
+	var result := {
+		"error_type": error_type,
+		"message": _clean_log_message(header, homes).left(1024),
+		"crash_source": "godot_log",
+	}
+	for i in script.size():
+		script[i] = _clean_log_message(script[i], homes)
+	for i in cpp.size():
+		cpp[i] = _clean_log_message(cpp[i], homes)
+	var frames: Array = script + cpp
+	if frames.is_empty():
+		return result
+	var stack := ""
+	for frame in frames:
+		var next: String = frame if stack == "" else stack + "\n" + frame
+		if next.length() > CRASH_STACK_MAX:
+			break
+		stack = next
+	result["stack"] = stack
+	# GDScript frames have names; C++ frames only with debug symbols (file:line).
+	var symbolicated := not script.is_empty()
+	for line in cpp:
+		if _source_line_re.search(line) != null:
+			symbolicated = true
+			break
+	result["symbolicated"] = symbolicated
+	var basis := error_type
+	for line in (script if not script.is_empty() else cpp).slice(0, CRASH_FINGERPRINT_FRAMES):
+		basis += "|" + _frame_noise_re.sub(String(line), "", true).strip_edges()
+	result["fingerprint"] = basis.sha1_text().left(16)
+	return result
 
 
 # Cleaning of captured engine messages (the rules of the Unreal plugin) --------

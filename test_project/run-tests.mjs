@@ -65,6 +65,26 @@ function run(mode, endpoint) {
   });
 }
 
+// A mode that must crash: it never prints MANALENS_RESULT and exits with an error.
+function crash(mode, endpoint) {
+  const args = ['--headless', '--path', project, '--', `--endpoint=${endpoint}`, '--publishable-key=mana_pk_fixture', `--mode=${mode}`];
+  return new Promise((resolve, reject) => {
+    const child = spawn(godot, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let text = '';
+    child.stdout.on('data', chunk => { text += chunk; });
+    child.stderr.on('data', chunk => { text += chunk; });
+    const timer = setTimeout(() => child.kill('SIGKILL'), 120_000);
+    child.on('error', reject);
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (text.includes('MANALENS_RESULT ') || !text.includes('Program crashed')) {
+        console.error(text);
+        reject(new Error(`the ${mode} mode did not crash (exit ${code}, signal ${signal})`));
+      } else resolve();
+    });
+  });
+}
+
 // 1. Fixtures.
 const bodies = [];
 const server = createServer(async (request, response) => {
@@ -106,3 +126,8 @@ for (const [mode, note] of OFFLINE_MODES) {
   await run(mode, 'http://127.0.0.1:9');
   console.log(`godot sdk: ${mode} mode ok (${note})`);
 }
+
+// 3. Crash stacks (P-2831): a real crash in OS.crash(), then the next launch.
+await crash('crash_launch', 'http://127.0.0.1:9');
+const crashed = await run('crash_stack', 'http://127.0.0.1:9');
+console.log(`godot sdk: crash_stack mode ok (${crashed.crash.error_type}, top frame ${crashed.crash.stack.split('\n')[0]})`);

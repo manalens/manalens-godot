@@ -28,6 +28,12 @@ func _platform() -> String:
 	return "windows"
 
 
+## No crash data: the fixture bodies must not depend on old engine logs on
+## this machine (the fixed clock would let any of them match).
+func _crash_log_path(_started_at: float) -> String:
+	return ""
+
+
 func _context() -> Dictionary:
 	var context := super()
 	context["locale"] = "en-US"

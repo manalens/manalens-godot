@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.0 (2026-11-27)
+
+- Crash stacks (P-2831): on Windows, macOS, and Linux, `app_crash` now says where the game crashed. At the next launch, the SDK reads the backtrace that Godot's crash handler wrote to the log of the crashed run (the rotated file in `user://logs/`) and adds `stack` (GDScript frames first, then C++ frames), `error_type` (for example `SIGSEGV`), `message`, `fingerprint`, `crash_source` (`godot_log`), and `symbolicated`. The SDK installs no crash handler, never sends the same log twice, reads nothing before consent, and cleans the text as engine errors. Without crash data (a force quit, a power loss, or file logging off), `app_crash` is sent as before. New option `capture_crash_stacks` (default `true`).
+- Tests: a new `crash_stack` step crashes the test project for real with `OS.crash()` and checks the next launch.
+
 ## 0.4.1 (2026-11-27)
 
 - A `413` response (batch too large) no longer drops the batch (P-2853). The SDK keeps the events in the queue, in the same order, and sends again at once with half the batch (at least 1 event). This is not a failure: no backoff wait, and the failure counter does not change. A `413` for a batch of 1 event drops that event and emits `send_failed(413, 1)`. After a success, the batch size is `flush_at` again. Other status codes keep their handling.

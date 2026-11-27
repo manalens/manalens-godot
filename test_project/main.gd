@@ -2,7 +2,7 @@ extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
 ##   --publishable-key=KEY  a project publishable key (required)
-##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, editor_setup, disabled, overflow, optout, corrupt, marker, fixtures, privacy, before_send, server, auto_identify, platform, traits, steam_link or batch_413
+##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, editor_setup, disabled, overflow, optout, corrupt, marker, fixtures, privacy, before_send, server, auto_identify, platform, traits, steam_link, batch_413, crash_launch or crash_stack
 ##   In a web export, the same arguments come from the page URL (?mode=web_id&endpoint=...&publishable-key=...).
 ##   --run-id=ID          tag for the events (default: random)
 ##
@@ -713,6 +713,8 @@ func _more_modes(mode: String, result: Dictionary) -> void:
 		"traits": await _traits_mode(result)
 		"steam_link": await _steam_link_mode(result)
 		"batch_413": await _batch_413_mode(result)
+		"crash_launch": await _crash_launch(result)
+		"crash_stack": await _crash_stack_mode(result)
 		_: _failures.append("unknown mode %s" % mode)
 
 
@@ -1488,3 +1490,97 @@ func _batch_413_mode(result: Dictionary) -> void:
 	_stop(bad)
 	bad.queue_free()
 	_fresh()
+
+
+## crash_launch: a real crash. The SDK starts a session, then OS.crash() runs
+## the engine crash handler, which writes the backtrace to the log file. The
+## run never prints MANALENS_RESULT; run-tests.mjs runs crash_stack next.
+func _crash_launch(_result: Dictionary) -> void:
+	_fresh()
+	Manalens.init(_options(String(_args["endpoint"])))
+	Manalens.track("before_crash")
+	await get_tree().process_frame
+	OS.crash("manalens crash_stack test")
+
+
+## crash_stack: the launch after crash_launch (P-2831). app_crash has the
+## stack from the rotated engine log: the GDScript frame of _crash_launch
+## first, a signal name, a fingerprint, and godot_log. The same log is not
+## sent again for a later crash, and capture_crash_stacks = false sends
+## app_crash without a stack.
+func _crash_stack_mode(result: Dictionary) -> void:
+	var endpoint := String(_args["endpoint"])
+	var sdk = Manalens
+	sdk.init(_options(endpoint))
+	var props := _crash_props(sdk, "")
+	_check(not props.is_empty(), "crash_stack: no app_crash after a real crash")
+	var stack := String(props.get("stack", ""))
+	result["crash"] = props
+	_check(stack.begins_with("[0] _crash_launch (res://main.gd:"), "crash_stack: the top frame is not _crash_launch: %s" % stack.left(200))
+	_check(stack.contains("\n[1] "), "crash_stack: no C++ frames after the GDScript frame")
+	_check(String(props.get("error_type", "")) in ["SIGTRAP", "SIGABRT", "crash"], "crash_stack: error_type %s" % props.get("error_type"))
+	_check(String(props.get("message", "")).begins_with("Program crashed"), "crash_stack: message %s" % props.get("message"))
+	_check(String(props.get("fingerprint", "")).length() == 16, "crash_stack: no fingerprint")
+	_check(props.get("crash_source") == "godot_log", "crash_stack: crash_source %s" % props.get("crash_source"))
+	_check(props.get("symbolicated") == true, "crash_stack: GDScript frames count as symbolicated")
+	_check(stack.length() <= 4096, "crash_stack: stack over 4096 characters")
+	await sdk.shutdown()
+
+	# A later crash with no new log: the same log is never sent twice.
+	var planted := _plant_open_session(false)
+	var again = await _crash_sdk(endpoint, true)
+	var later := _crash_props(again, planted)
+	_check(not later.is_empty(), "crash_stack: no app_crash for the second crash")
+	_check(not later.has("stack"), "crash_stack: the same crash log was sent twice")
+	await again.shutdown()
+	again.queue_free()
+
+	# capture_crash_stacks = false: app_crash without crash data.
+	planted = _plant_open_session(true)
+	var off = await _crash_sdk(endpoint, false)
+	var plain := _crash_props(off, planted)
+	_check(not plain.is_empty(), "crash_stack: no app_crash with capture_crash_stacks off")
+	_check(not plain.has("stack") and not plain.has("crash_source"), "crash_stack: capture_crash_stacks = false still read the log")
+	await off.shutdown()
+	off.queue_free()
+	_fresh()
+
+
+## The properties of the queued app_crash of `previous`, or {}. The session
+## that sent it is not `previous`: the next launch sends app_crash.
+func _crash_props(sdk, previous: String) -> Dictionary:
+	for entry in sdk._queue:
+		var event: Dictionary = entry.get("event", {})
+		if event.get("event") == "app_crash":
+			var props: Dictionary = event.get("properties", {})
+			if previous == "" or props.get("previous_session_id") == previous:
+				return props
+	return {}
+
+
+## Writes an open session that started an hour ago, as a crash leaves it.
+## forget_log: also forget the last crash log read.
+func _plant_open_session(forget_log: bool) -> String:
+	var cfg := ConfigFile.new()
+	cfg.load("user://manalens.cfg")
+	var now := Time.get_unix_time_from_system()
+	var planted := "00000000-0000-4000-8000-%012d" % (randi() % 1000000000000)
+	cfg.set_value("session", "id", planted)
+	cfg.set_value("session", "started_at", now - 3600.0)
+	cfg.set_value("session", "last_activity_at", now - 60.0)
+	cfg.set_value("session", "exited", false)
+	cfg.set_value("session", "focused", true)
+	if forget_log and cfg.has_section("crash"):
+		cfg.erase_section("crash")
+	cfg.save("user://manalens.cfg")
+	return planted
+
+
+func _crash_sdk(endpoint: String, capture: bool):
+	var sdk = load("res://addons/manalens/manalens.gd").new()
+	add_child(sdk)
+	var options := _options(endpoint)
+	options["capture_crash_stacks"] = capture
+	sdk.init(options)
+	await get_tree().process_frame
+	return sdk
