@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2 (2026-11-27)
+
+- Fix: a crash stack longer than 1024 characters made the collector refuse the whole `app_crash` (`INVALID_EVENT`), so the crash was lost. The stack now keeps the top frames, at most 1024 characters, the collector limit for a property value. Found in a production test of 0.5.1.
+
 ## 0.5.1 (2026-11-27)
 
 - Crash stacks: long frame names are no longer masked as `[redacted]`. Frames are cleaned of home folders, URLs, and emails only; a C++ symbol such as `SDL_GetPerformanceFrequency` is code, not a token. The fingerprint now uses the real names. Engine error messages are cleaned as before.

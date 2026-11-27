@@ -39,7 +39,7 @@ signal send_failed(status: int, dropped: int)
 signal steam_linked(linked: bool, status: int, code: String)
 
 const LIBRARY_NAME := "Manalens Godot SDK"
-const LIBRARY_VERSION := "0.5.1"
+const LIBRARY_VERSION := "0.5.2"
 const CONFIG_PATH := "user://manalens.cfg"
 const QUEUE_PATH := "user://manalens_queue.json"
 ## Written by set_consent(false). While it exists the SDK records nothing,
@@ -1551,7 +1551,8 @@ func _fingerprint(error_type: String, message: String, file: String, function: S
 # Crash stacks (sdks/SPEC.md "Crash stacks") ------------------------------------
 
 const CRASH_LOG_TAIL_BYTES := 262144
-const CRASH_STACK_MAX := 4096
+## The collector refuses a whole event with a property string over 1024 characters.
+const CRASH_STACK_MAX := 1024
 const CRASH_FINGERPRINT_FRAMES := 5
 ## Signal numbers of the POSIX crash handlers. SIGBUS is 7 on Linux, 10 on macOS.
 const SIGNAL_NAMES := {4: "SIGILL", 5: "SIGTRAP", 6: "SIGABRT", 8: "SIGFPE", 11: "SIGSEGV"}

@@ -1524,7 +1524,9 @@ func _crash_stack_mode(result: Dictionary) -> void:
 	_check(String(props.get("fingerprint", "")).length() == 16, "crash_stack: no fingerprint")
 	_check(props.get("crash_source") == "godot_log", "crash_stack: crash_source %s" % props.get("crash_source"))
 	_check(props.get("symbolicated") == true, "crash_stack: GDScript frames count as symbolicated")
-	_check(stack.length() <= 4096, "crash_stack: stack over 4096 characters")
+	_check(stack.length() <= 1024, "crash_stack: stack over 1024 characters (the collector refuses the event)")
+	for key in props:
+		_check(typeof(props[key]) != TYPE_STRING or String(props[key]).length() <= 1024, "crash_stack: %s is over 1024 characters (the collector refuses the event)" % key)
 	await sdk.shutdown()
 
 	# A later crash with no new log: the same log is never sent twice.
