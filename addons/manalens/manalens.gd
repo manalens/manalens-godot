@@ -41,7 +41,7 @@ signal send_failed(status: int, dropped: int)
 signal steam_linked(linked: bool, status: int, code: String)
 
 const LIBRARY_NAME := "Manalens Godot SDK"
-const LIBRARY_VERSION := "0.8.0"
+const LIBRARY_VERSION := "0.9.0"
 const CONFIG_PATH := "user://manalens.cfg"
 const QUEUE_PATH := "user://manalens_queue.json"
 ## The hang that the watchdog thread saw while the main thread was stuck
@@ -110,7 +110,7 @@ const MAX_STRING := 1024
 const MAX_PROPERTY_KEYS := 50
 const MAX_PROPERTY_BYTES := 8 * 1024
 ## Identity handoff (P-2523): the URL parameter that the web SDK reads.
-const HANDOFF_PARAM := "mana_hid"
+const HANDOFF_PARAM := "mana_handoff"
 
 var _options := {
 	## false: the SDK sends nothing, writes no files and keeps no ID. Use
@@ -800,16 +800,17 @@ func get_anonymous_id() -> String:
 	return _anonymous_id
 
 
-## Add this install's handoff parameter to a website URL before the game opens
-## it, so the website joins the browser to this player without identify():
+## Make a link to your website that keeps this player. The website joins the
+## browser to this player without identify():
 ##
-##   OS.shell_open(Manalens.link_url("https://example.com/wiki"))
+##   OS.shell_open(Manalens.get_handoff_url("https://example.com/wiki"))
 ##
-## The parameter is `mana_hid=<anonymous ID>.<unix seconds>`. The website's
-## Manalens SDK removes it from the address bar, and the collector
-## accepts it for 10 minutes. Before consent (or before init) the URL is
-## returned unchanged.
-func link_url(url: String) -> String:
+## The SDK adds `mana_handoff=<anonymous ID>.<unix seconds>` to the URL. The
+## value holds the current time and the link works for 10 minutes, so call this
+## when the player clicks, not earlier. The website's Manalens SDK removes the
+## parameter from the address bar. Before consent (or before init, or without
+## an anonymous ID) the URL is returned unchanged.
+func get_handoff_url(url: String) -> String:
 	if not _identity_active or _anonymous_id == "":
 		return url
 	var fragment := ""

@@ -31,7 +31,7 @@ const OFFLINE_MODES = [
   ['optout', 'set_consent(false) writes the opt-out marker and clears the ID'],
   ['corrupt', 'a config file that cannot be read: record nothing, keep the file'],
   ['marker', 'the opt-out marker wins when the config file is missing'],
-  ['link', 'link_url() before and after consent'],
+  ['link', 'get_handoff_url() before and after consent'],
   ['session_age', 'a 24-hour session ends; properties are trimmed'],
   ['web_reload', 'a launch that ends without a quit, then a second launch'],
   ['disabled', 'enabled = false: no ID, no queue, no files'],

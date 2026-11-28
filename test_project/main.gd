@@ -16,7 +16,7 @@ extends Node
 ## errors:   fresh state; track_error, before_send, the dedupe limit and an
 ##           engine error from push_error (Godot 4.5+ logger).
 ##
-## link:     link_url() before and after consent (handoff parameter, query and
+## link:     get_handoff_url() before and after consent (handoff parameter, query and
 ##           fragment kept); needs no network.
 ##
 ## session_age: a session that is 24 hours old ends and a new one starts; every
@@ -166,22 +166,22 @@ func _link(_run_id: String, result: Dictionary) -> void:
 	var sdk = Manalens
 	sdk.init(_options(OFFLINE_ENDPOINT, true))
 	var url := "https://example.com/wiki"
-	_check(sdk.link_url(url) == url, "link_url added an ID before consent")
+	_check(sdk.get_handoff_url(url) == url, "get_handoff_url added an ID before consent")
 	sdk.set_consent(true)
 	var id: String = sdk.get_anonymous_id()
 	var before := int(Time.get_unix_time_from_system())
-	var plain: String = sdk.link_url(url)
-	var query: String = sdk.link_url("https://example.com/wiki?page=2#boss")
+	var plain: String = sdk.get_handoff_url(url)
+	var query: String = sdk.get_handoff_url("https://example.com/wiki?page=2#boss")
 	var after := int(Time.get_unix_time_from_system())
 	result["plain"] = plain
 	result["query"] = query
-	var prefix := url + "?mana_hid=" + id + "."
+	var prefix := url + "?mana_handoff=" + id + "."
 	_check(plain.begins_with(prefix), "plain link: %s" % plain)
 	var at := int(plain.trim_prefix(prefix))
 	_check(at >= before and at <= after, "handoff time %d is not now" % at)
-	_check(query.begins_with("https://example.com/wiki?page=2&mana_hid=" + id + ".") and query.ends_with("#boss"), "query link: %s" % query)
+	_check(query.begins_with("https://example.com/wiki?page=2&mana_handoff=" + id + ".") and query.ends_with("#boss"), "query link: %s" % query)
 	sdk.reset()
-	_check(not sdk.link_url(url).contains(id), "link_url kept the old ID after reset()")
+	_check(not sdk.get_handoff_url(url).contains(id), "get_handoff_url kept the old ID after reset()")
 	await sdk.shutdown()
 
 
@@ -582,7 +582,7 @@ func _disabled(run_id: String, result: Dictionary) -> void:
 	var url := "https://example.com/wiki"
 	_check(sdk.get_anonymous_id() == "", "disabled: an anonymous ID was made")
 	_check(sdk.get_queue_size() == 0, "disabled: events were queued")
-	_check(sdk.link_url(url) == url, "disabled: link_url added an ID")
+	_check(sdk.get_handoff_url(url) == url, "disabled: get_handoff_url added an ID")
 	_check(not FileAccess.file_exists("user://manalens.cfg"), "disabled: the config file was written")
 	_check(not FileAccess.file_exists("user://manalens_queue.json"), "disabled: the queue file was written")
 

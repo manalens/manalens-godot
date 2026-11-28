@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.0 (2026-11-28)
+
+- Breaking (P-2889): `link_url(url)` is now `get_handoff_url(url)`, and the URL parameter `mana_hid` is now `mana_handoff`. The value format does not change (`<anonymous ID>.<unix seconds>`), and the existing query, fragment, and URL encoding do not change. The SDK has no alias for the old name. The function makes a link to your website that keeps this player. The value holds the current time, so call it when the player clicks (the link works for 10 minutes). Before consent, or without an anonymous ID, the URL is returned unchanged, as before.
+
 ## 0.8.0 (2026-11-28)
 
 - Steam Deck detection (P-2882): when the environment variable `SteamDeck` is `1` (Steam sets it on a Steam Deck), every event has `context.app.device` `steam_deck`. `context.app.platform` does not change (`linux` on SteamOS, `windows` on a Deck with Windows). On other devices the key is absent. The SDK reads the variable once in `init()`.

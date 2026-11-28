@@ -35,7 +35,7 @@ func _on_signed_in(player_id: String) -> void:
 | `identify(user_id, traits)` | Attaches a player ID (kept on disk) and traits. |
 | `traits(traits)` | Sets traits on this player, with or without a player ID. See [Traits](#traits). |
 | `link_steam(ticket)` | Verifies the Steam account of this player. See [Verify Steam ownership](#verify-steam-ownership). |
-| `link_url(url)` | Adds the handoff parameter (`mana_hid`) to a website URL, so the website joins this player without `identify()`. Use it with `OS.shell_open()`. Unchanged before consent. |
+| `get_handoff_url(url)` | Makes a link to your website that keeps this player: it adds `mana_handoff` to the URL, so the website joins this player without `identify()`. Use it with `OS.shell_open()`. The value holds the current time, so call it when the player clicks (the link works for 10 minutes). Unchanged before consent. |
 | `reset()` | Ends the session, forgets the player ID, makes a new anonymous ID and starts a new session. |
 | `set_consent(granted)` | Consent mode. `true` starts tracking; `false` deletes the ID, the session and the queue. |
 | `track_error(message, options)` | Sends an `error` event. Options: `severity`, `error_type`, `handled`, `stack`, `file`, `line`, `function`, `fingerprint`, `properties`. |
