@@ -21,9 +21,9 @@ extends Node
 ## Errors: `track_error()` sends an `error` event. On Godot 4.5+ the SDK also
 ## sends engine and script errors (`capture_engine_errors`). When the last run
 ## ended without a normal exit (a crash or a killed process), the next launch
-## sends `app_crash` in that old session. A main thread that is stuck for
+## sends `game_crash` in that old session. A main thread that is stuck for
 ## `hang_threshold_seconds` (5 s) is sent as an `error` with `error_type`
-## `app_hang`; a crash after it has `hang_message_id`.
+## `game_hang`; a crash after it has `hang_message_id`.
 
 signal flushed(sent: int, ok: bool)
 ## Events were dropped and will never be sent. `status` is the HTTP status
@@ -159,10 +159,10 @@ var _options := {
 	## Automatic errors in one session; track_error() calls do not count.
 	"max_auto_errors_per_session": 50,
 	## Desktop: add the engine's crash backtrace (from the rotated log file)
-	## to app_crash at the next launch. Needs file logging (on by default).
+	## to game_crash at the next launch. Needs file logging (on by default).
 	"capture_crash_stacks": true,
 	## Hang detection (P-2833): a watchdog thread sends an `error` with
-	## `error_type` `app_hang` when one frame takes longer than this many
+	## `error_type` `game_hang` when one frame takes longer than this many
 	## seconds (the main thread is stuck). 0 turns it off; other values are
 	## clamped to 1 to 60 s. Not counted while
 	## the game is unfocused or paused by the OS, in the first frames after
@@ -172,7 +172,7 @@ var _options := {
 	## A dedicated server build (the `dedicated_server` feature tag, or the
 	## headless display server) is not a player. false (default): on a server
 	## build the SDK sends no game_open, session_start, session_end or
-	## app_crash, so the server does not count as an install or a
+	## game_crash, so the server does not count as an install or a
 	## session. track() and identify() still work. true: a server build sends
 	## them as a client does.
 	"track_server_builds": false,
@@ -317,7 +317,7 @@ func init(options: Dictionary = {}) -> void:
 	_initialized = true
 	_server_quiet = is_server_build() and not bool(_options.track_server_builds)
 	if _server_quiet:
-		print("Manalens: server build (dedicated_server or headless); no game_open, session or app_crash events. Set track_server_builds to send them")
+		print("Manalens: server build (dedicated_server or headless); no game_open, session or game_crash events. Set track_server_builds to send them")
 	_web_storage = OS.has_feature("web") and _web_storage_available()
 	if _web_storage:
 		var text = _store_read(CONFIG_PATH)
@@ -979,7 +979,7 @@ func _start_identity() -> void:
 		_session_started_at = float(_cfg.get_value("session", "started_at", now))
 		_last_activity_at = float(_cfg.get_value("session", "last_activity_at", _session_started_at))
 		# A hang that the game never recovered from (it was killed while
-		# stuck), else the last hang of the session that ended: app_crash
+		# stuck), else the last hang of the session that ended: game_crash
 		# links to it.
 		var hang_id := _send_saved_hang()
 		if hang_id == "":
@@ -997,7 +997,7 @@ func _start_identity() -> void:
 				if value != "":
 					crash["previous_" + key] = value
 			crash.merge(_crash_stack(_session_started_at))
-			_enqueue(_build("track", "app_crash", crash, _last_activity_at))
+			_enqueue(_build("track", "game_crash", crash, _last_activity_at))
 		_end_session(_last_activity_at)
 	elif _store_exists(HANG_PATH):
 		_store_remove(HANG_PATH)  # The hang of a session that is gone.
@@ -1005,7 +1005,7 @@ func _start_identity() -> void:
 	if not _server_quiet:
 		_enqueue(_build("track", "game_open", {"is_first_open": first_open, "first_open_at": String(_cfg.get_value("identity", "first_open_at", _iso(now)))}))
 	_save_cfg()
-	# Write game_open (the install signal) and app_crash to disk before
+	# Write game_open (the install signal) and game_crash to disk before
 	# any send: a process killed before the next save would lose them.
 	_save_queue()
 	if _deferred_identify != null:
@@ -1678,8 +1678,8 @@ func _start_hang_watch() -> void:
 	_hang_thread.start(_hang_watch)
 
 
-## No watchdog on web (no threads in most exports, and no app_crash), on a
-## quiet server build (no app_crash), and in a run from the editor with the
+## No watchdog on web (no threads in most exports, and no game_crash), on a
+## quiet server build (no game_crash), and in a run from the editor with the
 ## debugger on (a breakpoint stops the main thread).
 func _thread_unsafe_for_hangs() -> bool:
 	return _platform() == "web" or _server_quiet or EngineDebugger.is_active()
@@ -1718,11 +1718,13 @@ func _hang_frame() -> void:
 
 ## The main thread is back after a hang: send it once, with its duration.
 func _record_recovered_hang(marker: Dictionary, duration_ms: int) -> void:
-	var id := _record_error(_hang_message(duration_ms / 1000.0), {
+	# Seconds with one decimal (6.2), as in the other SDKs.
+	var duration_s := roundf(duration_ms / 100.0) / 10.0
+	var id := _record_error(_hang_message(duration_s), {
 		"severity": "error",
-		"error_type": "app_hang",
+		"error_type": "game_hang",
 		"handled": false,
-		"properties": {"hang_duration_ms": duration_ms},
+		"properties": {"hang_duration_s": duration_s},
 	}, SOURCE_AUTO, float(marker.started_at), String(marker.message_id))
 	if id != "" and _session_id != "":
 		# A crash later in this session links to this hang.
@@ -1763,7 +1765,7 @@ func _send_saved_hang() -> String:
 		props["breadcrumbs"] = String(marker.breadcrumbs).right(MAX_STRING)
 	id = _record_error(_hang_message(float(marker.get("threshold_s", 0.0))), {
 		"severity": "error",
-		"error_type": "app_hang",
+		"error_type": "game_hang",
 		"handled": false,
 		"app": app,
 		"properties": props,
@@ -1772,7 +1774,7 @@ func _send_saved_hang() -> String:
 	return id
 
 
-## The text of every app_hang (the same as the web SDK): the real duration of a
+## The text of every game_hang (the same as the web SDK): the real duration of a
 ## hang that ended, the threshold of a hang that never ended.
 func _hang_message(seconds: float) -> String:
 	return "The main thread was blocked for %.1f s" % seconds
@@ -1828,7 +1830,7 @@ const CRASH_FINGERPRINT_FRAMES := 5
 const SIGNAL_NAMES := {4: "SIGILL", 5: "SIGTRAP", 6: "SIGABRT", 8: "SIGFPE", 11: "SIGSEGV"}
 
 
-## The crash data of the session that crashed, for app_crash: the engine's
+## The crash data of the session that crashed, for game_crash: the engine's
 ## crash handler writes a backtrace to the log, and Godot rotates that log
 ## at the next launch (debug/file_logging). The SDK installs no crash handler.
 ## Reads the newest rotated log written after `started_at`, at most once per

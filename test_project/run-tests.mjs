@@ -42,7 +42,7 @@ const OFFLINE_MODES = [
   ['traits', 'traits(): anonymous and user traits, protected traits not sent, consent'],
   ['steam_link', 'link_steam() and steam_link: wait for the first accepted batch + 20 s, ticket, body, no retry of a refusal, one retry after a 429, consent and reset() during the wait'],
   ['batch_413', 'a 413 halves the batch and sends again at once; a 413 for 1 event drops it'],
-  ['hang', 'a stuck main thread: app_hang once per stuck period, written while stuck; not unfocused or in the first frames; app_crash links to it'],
+  ['hang', 'a stuck main thread: game_hang once per stuck period, written while stuck; not unfocused or in the first frames; game_crash links to it'],
 ];
 
 function run(mode, endpoint) {
@@ -167,7 +167,7 @@ if (process.env.SKIP_CRASH_TEST === '1') {
 }
 
 // 4. Hang detection (P-2833): a launch whose main thread is stuck for good is
-// killed; the next launch sends the saved app_hang and links app_crash to it.
+// killed; the next launch sends the saved game_hang and links game_crash to it.
 await killWhenStuck('hang_launch', 'http://127.0.0.1:9');
 const hung = await run('hang_crash', 'http://127.0.0.1:9');
-console.log(`godot sdk: hang_crash mode ok (app_crash hang_message_id ${hung.crash.hang_message_id})`);
+console.log(`godot sdk: hang_crash mode ok (game_crash hang_message_id ${hung.crash.hang_message_id})`);

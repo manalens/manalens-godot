@@ -12,7 +12,7 @@ extends Node
 ##           queued and no ID is stored; then set_consent(true).
 ## recovery: keeps the ID; plants a session that was left open 2 hours ago (a
 ##           crash) and checks that init ends it with session_end and sends
-##           app_crash.
+##           game_crash.
 ## errors:   fresh state; track_error, before_send, the dedupe limit and an
 ##           engine error from push_error (Godot 4.5+ logger).
 ##
@@ -25,7 +25,7 @@ extends Node
 ##           trimmed to 50 keys and 8 KB (P-2700). Needs no network.
 ##
 ## web_reload: a launch that ends without a quit (a reloaded or closed tab), then
-##           a second launch. On web: no app_crash; on windows (the
+##           a second launch. On web: no game_crash; on windows (the
 ##           control): one. The old session ends in both. Needs no network.
 ##
 ## install_kill: a first launch with no network is killed before any send, tick,
@@ -307,16 +307,16 @@ func _web_reload(_run_id: String, result: Dictionary) -> void:
 		var ended := 0
 		for entry in second._queue:
 			var event: Dictionary = entry.event
-			if String(event.get("event", "")) == "app_crash":
+			if String(event.get("event", "")) == "game_crash":
 				crashes += 1
 			if String(event.get("event", "")) == "session_end" and String(event.session_id) == session:
 				ended += 1
-		result["%s_app_crash" % platform] = crashes
+		result["%s_game_crash" % platform] = crashes
 		_check(ended == 1, "%s: the old session did not end" % platform)
 		if platform == "web":
-			_check(crashes == 0, "web: a reload sent app_crash")
+			_check(crashes == 0, "web: a reload sent game_crash")
 		else:
-			_check(crashes == 1, "%s: no app_crash after a launch without a quit" % platform)
+			_check(crashes == 1, "%s: no game_crash after a launch without a quit" % platform)
 		first.queue_free()
 		second._timer.stop()
 		second.set_process(false)
@@ -653,7 +653,7 @@ func _marker(run_id: String, result: Dictionary) -> void:
 
 
 ## The fixture scenario. Launch 1 plays, identifies, hits an error, then
-## crashes (no quit). Launch 2 sends app_crash and session_end of the
+## crashes (no quit). Launch 2 sends game_crash and session_end of the
 ## crashed session, then quits cleanly.
 func _fixtures(_run_id: String, result: Dictionary) -> void:
 	_fresh()
@@ -724,11 +724,11 @@ func _more_modes(mode: String, result: Dictionary) -> void:
 ## server: a dedicated server build (G-2533). `--headless` makes the display
 ## server "headless", so this run is a server build. Without
 ## track_server_builds: no game_open, session_start, session_end or
-## app_crash, and no install; track() and identify() still work. With
+## game_crash, and no install; track() and identify() still work. With
 ## the option (as in this project's Project Settings): the client events come
 ## back. Needs no network. pnpm test:godot runs it after the fixtures.
 func _server_mode(result: Dictionary) -> void:
-	const AUTOMATIC := ["game_open", "session_start", "session_end", "app_crash"]
+	const AUTOMATIC := ["game_open", "session_start", "session_end", "game_crash"]
 	result["display_server"] = DisplayServer.get_name()
 	_check(Manalens.is_server_build(), "server: a --headless run is not a server build (display server %s)" % DisplayServer.get_name())
 	# Off (the default): the init() option wins over the Project Setting.
@@ -1537,17 +1537,17 @@ func _crash_launch(_result: Dictionary) -> void:
 	OS.crash("manalens crash_stack test")
 
 
-## crash_stack: the launch after crash_launch (P-2831). app_crash has the
+## crash_stack: the launch after crash_launch (P-2831). game_crash has the
 ## stack from the rotated engine log: the GDScript frame of _crash_launch
 ## first, a signal name, a fingerprint, and godot_log. The same log is not
 ## sent again for a later crash, and capture_crash_stacks = false sends
-## app_crash without a stack.
+## game_crash without a stack.
 func _crash_stack_mode(result: Dictionary) -> void:
 	var endpoint := String(_args["endpoint"])
 	var sdk = Manalens
 	sdk.init(_options(endpoint))
 	var props := _crash_props(sdk, "")
-	_check(not props.is_empty(), "crash_stack: no app_crash after a real crash")
+	_check(not props.is_empty(), "crash_stack: no game_crash after a real crash")
 	var stack := String(props.get("stack", ""))
 	result["crash"] = props
 	_check(stack.begins_with("[0] _crash_launch (res://main.gd:"), "crash_stack: the top frame is not _crash_launch: %s" % stack.left(200))
@@ -1567,28 +1567,28 @@ func _crash_stack_mode(result: Dictionary) -> void:
 	var planted := _plant_open_session(false)
 	var again = await _crash_sdk(endpoint, true)
 	var later := _crash_props(again, planted)
-	_check(not later.is_empty(), "crash_stack: no app_crash for the second crash")
+	_check(not later.is_empty(), "crash_stack: no game_crash for the second crash")
 	_check(not later.has("stack"), "crash_stack: the same crash log was sent twice")
 	await again.shutdown()
 	again.queue_free()
 
-	# capture_crash_stacks = false: app_crash without crash data.
+	# capture_crash_stacks = false: game_crash without crash data.
 	planted = _plant_open_session(true)
 	var off = await _crash_sdk(endpoint, false)
 	var plain := _crash_props(off, planted)
-	_check(not plain.is_empty(), "crash_stack: no app_crash with capture_crash_stacks off")
+	_check(not plain.is_empty(), "crash_stack: no game_crash with capture_crash_stacks off")
 	_check(not plain.has("stack") and not plain.has("crash_source"), "crash_stack: capture_crash_stacks = false still read the log")
 	await off.shutdown()
 	off.queue_free()
 	_fresh()
 
 
-## The properties of the queued app_crash of `previous`, or {}. The session
-## that sent it is not `previous`: the next launch sends app_crash.
+## The properties of the queued game_crash of `previous`, or {}. The session
+## that sent it is not `previous`: the next launch sends game_crash.
 func _crash_props(sdk, previous: String) -> Dictionary:
 	for entry in sdk._queue:
 		var event: Dictionary = entry.get("event", {})
-		if event.get("event") == "app_crash":
+		if event.get("event") == "game_crash":
 			var props: Dictionary = event.get("properties", {})
 			if previous == "" or props.get("previous_session_id") == previous:
 				return props
@@ -1625,12 +1625,12 @@ func _crash_sdk(endpoint: String, capture: bool):
 
 # Hang detection (P-2833) -------------------------------------------------------
 
-## The queued app_hang errors of `sdk`, oldest first.
+## The queued game_hang errors of `sdk`, oldest first.
 func _hangs(sdk) -> Array:
 	var out := []
 	for entry in sdk._queue:
 		var event: Dictionary = entry.get("event", {})
-		if event.get("event") == "error" and event.get("properties", {}).get("error_type") == "app_hang":
+		if event.get("event") == "error" and event.get("properties", {}).get("error_type") == "game_hang":
 			out.append(event)
 	return out
 
@@ -1648,7 +1648,7 @@ func _frames(count: int) -> void:
 
 ## hang: the main thread is stuck for longer than hang_threshold_seconds. The
 ## watchdog writes the hang to disk while the main thread is stuck; the main
-## thread sends it once when it recovers, with hang_duration_ms and no stack. No
+## thread sends it once when it recovers, with hang_duration_s and no stack. No
 ## hang in the first frames or while the game is unfocused; 0 turns it off;
 ## before_send can drop it; a crash later in the session links to it. Needs no
 ## network.
@@ -1689,13 +1689,14 @@ func _hang_mode(result: Dictionary) -> void:
 	_check(FileAccess.file_exists("user://manalens_hang.json"), "hang: the watchdog did not write the hang while the main thread was stuck")
 	await _frames(3)
 	var hangs := _hangs(sdk)
-	_check(hangs.size() == 1, "hang: expected 1 app_hang for one stuck period, got %d" % hangs.size())
+	_check(hangs.size() == 1, "hang: expected 1 game_hang for one stuck period, got %d" % hangs.size())
 	if hangs.size() >= 1:
 		var props: Dictionary = hangs[0].properties
 		result["hang"] = props
 		_check(props.get("severity") == "error" and props.get("handled") == false and props.get("source") == "auto", "hang: severity, handled or source: %s" % props)
-		_check(int(props.get("hang_duration_ms", 0)) >= 900, "hang: hang_duration_ms %s" % props.get("hang_duration_ms"))
-		var text := "The main thread was blocked for %.1f s" % (int(props.get("hang_duration_ms", 0)) / 1000.0)
+		var duration_s := float(props.get("hang_duration_s", 0.0))
+		_check(duration_s >= 0.9 and is_equal_approx(duration_s * 10.0, roundf(duration_s * 10.0)), "hang: hang_duration_s %s (seconds, one decimal)" % props.get("hang_duration_s"))
+		var text := "The main thread was blocked for %.1f s" % duration_s
 		_check(String(props.get("message", "")) == text, "hang: message %s, expected %s" % [props.get("message"), text])
 		_check(not props.has("stack"), "hang: Godot cannot read the main thread stack, but a stack was sent")
 		_check(String(props.get("breadcrumbs", "")).contains("before_hang"), "hang: no breadcrumbs")
@@ -1712,19 +1713,19 @@ func _hang_mode(result: Dictionary) -> void:
 	await _frames(2)
 	OS.delay_msec(1200)
 	await _frames(2)
-	_check(_hangs(sdk).size() == 2, "hang: no app_hang after focus came back (%d)" % _hangs(sdk).size())
+	_check(_hangs(sdk).size() == 2, "hang: no game_hang after focus came back (%d)" % _hangs(sdk).size())
 
 	# before_send drops the hang: no link to it.
 	var kept := String(sdk._cfg.get_value("session", "hang_message_id", ""))
 	sdk.set_before_send(func(event):
-		return null if event.get("properties", {}).get("error_type") == "app_hang" else event)
+		return null if event.get("properties", {}).get("error_type") == "game_hang" else event)
 	OS.delay_msec(1200)
 	await _frames(2)
-	_check(_hangs(sdk).size() == 2, "hang: before_send did not drop app_hang")
+	_check(_hangs(sdk).size() == 2, "hang: before_send did not drop game_hang")
 	_check(String(sdk._cfg.get_value("session", "hang_message_id", "")) == kept, "hang: a dropped hang changed hang_message_id")
 	sdk.set_before_send(Callable())
 
-	# The game crashes later in this session: app_crash links to the last hang.
+	# The game crashes later in this session: game_crash links to the last hang.
 	var session: String = sdk._session_id
 	sdk._save_session()
 	sdk._save_queue()
@@ -1735,7 +1736,7 @@ func _hang_mode(result: Dictionary) -> void:
 	next.clock += 60.0
 	next.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50}))
 	var crash := _crash_props(next, session)
-	_check(String(crash.get("hang_message_id", "")) == kept and kept != "", "hang: app_crash has hang_message_id %s, expected %s" % [crash.get("hang_message_id"), kept])
+	_check(String(crash.get("hang_message_id", "")) == kept and kept != "", "hang: game_crash has hang_message_id %s, expected %s" % [crash.get("hang_message_id"), kept])
 	_stop_hangs(next)
 	next.queue_free()
 	_fresh()
@@ -1754,7 +1755,7 @@ func _hang_mode(result: Dictionary) -> void:
 	OS.delay_msec(700)
 	_check(not FileAccess.file_exists("user://manalens_hang.json"), "hang: a hang was saved after set_consent(false)")
 	await _frames(2)
-	_check(_hangs(withdrawn).is_empty(), "hang: an app_hang was queued after set_consent(false)")
+	_check(_hangs(withdrawn).is_empty(), "hang: an game_hang was queued after set_consent(false)")
 	_stop_hangs(withdrawn)
 	withdrawn.queue_free()
 	_fresh()
@@ -1776,7 +1777,7 @@ func _hang_launch(_result: Dictionary) -> void:
 
 ## hang_crash: the launch after hang_launch. The hang that the watchdog saved
 ## while the game was stuck is sent in the old session (handled false, no
-## stack), and app_crash has its message_id as hang_message_id.
+## stack), and game_crash has its message_id as hang_message_id.
 func _hang_crash_mode(result: Dictionary) -> void:
 	var sdk = Manalens
 	sdk.init(_options(String(_args["endpoint"])))
@@ -1784,14 +1785,14 @@ func _hang_crash_mode(result: Dictionary) -> void:
 	var crash := _crash_props(sdk, "")
 	result["hang"] = hangs[0].properties if hangs.size() == 1 else {}
 	result["crash"] = crash
-	_check(hangs.size() == 1, "hang_crash: expected 1 app_hang from the killed launch, got %d" % hangs.size())
-	_check(not crash.is_empty(), "hang_crash: no app_crash after the killed launch")
+	_check(hangs.size() == 1, "hang_crash: expected 1 game_hang from the killed launch, got %d" % hangs.size())
+	_check(not crash.is_empty(), "hang_crash: no game_crash after the killed launch")
 	if hangs.size() == 1 and not crash.is_empty():
 		var hang: Dictionary = hangs[0]
 		_check(crash.get("hang_message_id") == hang.message_id, "hang_crash: hang_message_id %s is not the hang %s" % [crash.get("hang_message_id"), hang.message_id])
 		_check(hang.get("session_id") == crash.get("previous_session_id"), "hang_crash: the hang is not in the old session")
 		_check(hang.properties.get("handled") == false and hang.properties.get("severity") == "error", "hang_crash: handled or severity: %s" % hang.properties)
-		_check(not hang.properties.has("stack") and not hang.properties.has("hang_duration_ms"), "hang_crash: a stack or a duration for a hang that never ended")
+		_check(not hang.properties.has("stack") and not hang.properties.has("hang_duration_s"), "hang_crash: a stack or a duration for a hang that never ended")
 		_check(String(hang.properties.get("message", "")) == "The main thread was blocked for 1.0 s", "hang_crash: message %s" % hang.properties.get("message"))
 		_check(String(hang.properties.get("breadcrumbs", "")).contains("before_hang"), "hang_crash: no breadcrumbs from the stuck launch")
 		_check(hang.context.app.get("build") == "godot-test", "hang_crash: context.app.build %s" % hang.context.app.get("build"))
