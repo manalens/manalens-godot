@@ -41,7 +41,7 @@ signal send_failed(status: int, dropped: int)
 signal steam_linked(linked: bool, status: int, code: String)
 
 const LIBRARY_NAME := "Manalens Godot SDK"
-const LIBRARY_VERSION := "0.6.0"
+const LIBRARY_VERSION := "0.7.0"
 const CONFIG_PATH := "user://manalens.cfg"
 const QUEUE_PATH := "user://manalens_queue.json"
 ## The hang that the watchdog thread saw while the main thread was stuck
