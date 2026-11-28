@@ -43,12 +43,18 @@ const OFFLINE_MODES = [
   ['steam_link', 'link_steam() and steam_link: wait for the first accepted batch + 20 s, ticket, body, no retry of a refusal, one retry after a 429, consent and reset() during the wait'],
   ['batch_413', 'a 413 halves the batch and sends again at once; a 413 for 1 event drops it'],
   ['hang', 'a stuck main thread: game_hang once per stuck period, written while stuck; not unfocused or in the first frames; game_crash links to it'],
+  ['steam_deck', 'SteamDeck=1: context.app.device is steam_deck, platform unchanged; without it the key is absent', { SteamDeck: '1' }],
 ];
 
-function run(mode, endpoint) {
+// Each run gets this environment: without SteamDeck, so a run on a Steam Deck
+// sends the same fixture bodies. A mode adds its own variables.
+const baseEnv = { ...process.env };
+delete baseEnv.SteamDeck;
+
+function run(mode, endpoint, env = {}) {
   const args = ['--headless', '--path', project, '--', `--endpoint=${endpoint}`, '--publishable-key=mana_pk_fixture', `--mode=${mode}`];
   return new Promise((resolve, reject) => {
-    const child = spawn(godot, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(godot, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...baseEnv, ...env } });
     let text = '';
     child.stdout.on('data', chunk => { text += chunk; });
     child.stderr.on('data', chunk => { text += chunk; });
@@ -70,7 +76,7 @@ function run(mode, endpoint) {
 function crash(mode, endpoint) {
   const args = ['--headless', '--path', project, '--', `--endpoint=${endpoint}`, '--publishable-key=mana_pk_fixture', `--mode=${mode}`];
   return new Promise((resolve, reject) => {
-    const child = spawn(godot, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(godot, args, { stdio: ['ignore', 'pipe', 'pipe'], env: baseEnv });
     let text = '';
     child.stdout.on('data', chunk => { text += chunk; });
     child.stderr.on('data', chunk => { text += chunk; });
@@ -91,7 +97,7 @@ function crash(mode, endpoint) {
 function killWhenStuck(mode, endpoint) {
   const args = ['--headless', '--path', project, '--', `--endpoint=${endpoint}`, '--publishable-key=mana_pk_fixture', `--mode=${mode}`];
   return new Promise((resolve, reject) => {
-    const child = spawn(godot, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(godot, args, { stdio: ['ignore', 'pipe', 'pipe'], env: baseEnv });
     let text = '';
     let killer = null;
     const onData = chunk => {
@@ -150,8 +156,8 @@ if (process.env.UPDATE_FIXTURES === '1') {
 }
 
 // 2. Modes with no network: the endpoint is a closed port.
-for (const [mode, note] of OFFLINE_MODES) {
-  await run(mode, 'http://127.0.0.1:9');
+for (const [mode, note, env] of OFFLINE_MODES) {
+  await run(mode, 'http://127.0.0.1:9', env);
   console.log(`godot sdk: ${mode} mode ok (${note})`);
 }
 

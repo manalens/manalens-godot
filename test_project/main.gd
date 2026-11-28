@@ -2,7 +2,7 @@ extends Node
 ## Headless SDK test. Arguments after `--`:
 ##   --endpoint=URL       the collector (required)
 ##   --publishable-key=KEY  a project publishable key (required)
-##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, editor_setup, disabled, overflow, optout, corrupt, marker, fixtures, privacy, before_send, server, auto_identify, platform, traits, steam_link, batch_413, crash_launch, crash_stack, hang, hang_launch or hang_crash
+##   --mode=MODE          offline (default), consent, recovery, errors, link, session_age, web_reload, install_kill, shutdown_tick, editor_setup, disabled, overflow, optout, corrupt, marker, fixtures, privacy, before_send, server, auto_identify, platform, traits, steam_link, batch_413, crash_launch, crash_stack, hang, hang_launch, hang_crash or steam_deck
 ##   In a web export, the same arguments come from the page URL (?mode=web_id&endpoint=...&publishable-key=...).
 ##   --run-id=ID          tag for the events (default: random)
 ##
@@ -718,6 +718,7 @@ func _more_modes(mode: String, result: Dictionary) -> void:
 		"hang": await _hang_mode(result)
 		"hang_launch": await _hang_launch(result)
 		"hang_crash": _hang_crash_mode(result)
+		"steam_deck": _steam_deck_mode(result)
 		_: _failures.append("unknown mode %s" % mode)
 
 
@@ -1798,4 +1799,46 @@ func _hang_crash_mode(result: Dictionary) -> void:
 		_check(hang.context.app.get("build") == "godot-test", "hang_crash: context.app.build %s" % hang.context.app.get("build"))
 	_check(not FileAccess.file_exists("user://manalens_hang.json"), "hang_crash: the saved hang was not removed")
 	_stop_hangs(sdk)
+	_fresh()
+
+
+## steam_deck: run-tests.mjs starts this mode with SteamDeck=1, as Steam does on
+## a Steam Deck. Every event has context.app.device "steam_deck" and the same
+## platform. The SDK reads the variable once in init(). Without the variable
+## (or with another value), the key is absent. Needs no network.
+func _steam_deck_mode(result: Dictionary) -> void:
+	_check(OS.get_environment("SteamDeck") == "1", "steam_deck: run-tests.mjs must start this mode with SteamDeck=1")
+	_fresh()
+	var deck = load("res://fixture_sdk.gd").new()
+	add_child(deck)
+	deck.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50}))
+	deck.track("deck_event")
+	var event = _last_named(deck, "deck_event")
+	var app: Dictionary = event.context.app if event != null else {}
+	result["deck_app"] = app
+	_check(app.get("device", "") == "steam_deck", "steam_deck: context.app.device is %s, not steam_deck" % app.get("device"))
+	_check(app.get("platform", "") == "windows", "steam_deck: the platform changed to %s" % app.get("platform"))
+	for entry in deck._queue:
+		_check(entry.event.context.app.get("device", "") == "steam_deck", "steam_deck: %s has no device" % entry.event.get("event", entry.event.type))
+	# Read once at init(): a later change of the variable does not matter.
+	OS.unset_environment("SteamDeck")
+	_check(deck._context().app.get("device", "") == "steam_deck", "steam_deck: the device was not read once at init()")
+	_stop(deck)
+	deck.queue_free()
+	for value in ["", "0", "true"]:
+		if value == "":
+			OS.unset_environment("SteamDeck")
+		else:
+			OS.set_environment("SteamDeck", value)
+		_fresh()
+		var other = load("res://fixture_sdk.gd").new()
+		add_child(other)
+		other.init(_fixture_options(OFFLINE_ENDPOINT, {"flush_at": 50}))
+		other.track("other_event")
+		var sent = _last_named(other, "other_event")
+		var other_app: Dictionary = sent.context.app if sent != null else {"device": "no event"}
+		_check(not other_app.has("device"), "steam_deck: SteamDeck=%s sent device %s" % [value, other_app.get("device")])
+		_stop(other)
+		other.queue_free()
+	OS.unset_environment("SteamDeck")
 	_fresh()

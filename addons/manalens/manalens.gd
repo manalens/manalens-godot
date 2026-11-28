@@ -41,7 +41,7 @@ signal send_failed(status: int, dropped: int)
 signal steam_linked(linked: bool, status: int, code: String)
 
 const LIBRARY_NAME := "Manalens Godot SDK"
-const LIBRARY_VERSION := "0.7.0"
+const LIBRARY_VERSION := "0.8.0"
 const CONFIG_PATH := "user://manalens.cfg"
 const QUEUE_PATH := "user://manalens_queue.json"
 ## The hang that the watchdog thread saw while the main thread was stuck
@@ -181,6 +181,7 @@ var _options := {
 var _initialized := false
 ## true on a server build without track_server_builds: no automatic client events.
 var _server_quiet := false
+var _device := ""  # context.app.device: "steam_deck" when Steam sets SteamDeck=1; read once in init()
 ## true when init() ran with enabled = false: every call is a no-op.
 var _disabled := false
 ## The config file exists but could not be read: it may hold an opt-out, so
@@ -315,6 +316,8 @@ func init(options: Dictionary = {}) -> void:
 	_auto_identify_tries = AUTO_IDENTIFY_TRIES if String(_options.auto_identify) != "" else 0
 	_steam_link_tries = AUTO_IDENTIFY_TRIES if bool(_options.steam_link) else 0
 	_initialized = true
+	# Steam sets SteamDeck=1 on a Steam Deck (SteamOS or Windows). platform does not change.
+	_device = "steam_deck" if OS.get_environment("SteamDeck") == "1" else ""
 	_server_quiet = is_server_build() and not bool(_options.track_server_builds)
 	if _server_quiet:
 		print("Manalens: server build (dedicated_server or headless); no game_open, session or game_crash events. Set track_server_builds to send them")
@@ -1257,6 +1260,8 @@ func _context() -> Dictionary:
 	for key in ["app_version", "build", "storefront"]:
 		if String(_options[key]) != "":
 			app[key] = String(_options[key])
+	if _device != "":
+		app["device"] = _device
 	var context := {
 		"app": app,
 		"locale": OS.get_locale().replace("_", "-").left(32),

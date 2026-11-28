@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.0 (2026-11-28)
+
+- Steam Deck detection (P-2882): when the environment variable `SteamDeck` is `1` (Steam sets it on a Steam Deck), every event has `context.app.device` `steam_deck`. `context.app.platform` does not change (`linux` on SteamOS, `windows` on a Deck with Windows). On other devices the key is absent. The SDK reads the variable once in `init()`.
+- Tests: a new mode `steam_deck` runs with `SteamDeck=1` and checks the key, and checks that it is absent without the variable. `run-tests.mjs` removes `SteamDeck` from the environment of the other runs, so the fixtures are the same on a Steam Deck.
+
 ## 0.7.0 (2026-11-28)
 
 - Breaking: the crash event is now `game_crash` (was `app_crash`), the hang `error_type` is now `game_hang` (was `app_hang`), and `hang_duration_ms` is now `hang_duration_s` in seconds (one decimal, for example `6.2`). The SDK does not send or accept the old names. Events that an older version queued on disk keep their old name.
